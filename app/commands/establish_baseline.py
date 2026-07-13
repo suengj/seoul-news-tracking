@@ -24,10 +24,7 @@ def main() -> int:
 
     with open_database(settings.database_path) as db:
         if not db.is_empty:
-            print(
-                "database already has records; baseline already established. "
-                "No changes made."
-            )
+            print("database already has records; baseline already established. No changes made.")
             return 0
 
         run_id = db.start_run("establish_baseline")

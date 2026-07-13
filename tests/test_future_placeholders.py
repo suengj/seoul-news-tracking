@@ -13,6 +13,9 @@ RUNTIME_MODULES = [
     APP_DIR / "parser.py",
     APP_DIR / "database.py",
     APP_DIR / "telegram_sender.py",
+    APP_DIR / "telegram_bot.py",
+    APP_DIR / "poller.py",
+    APP_DIR / "process_lock.py",
     APP_DIR / "config.py",
     APP_DIR / "models.py",
     *sorted((APP_DIR / "commands").glob("*.py")),
@@ -53,9 +56,17 @@ def test_future_modules_not_imported_by_part1_runtime():
     for module_path in RUNTIME_MODULES:
         tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("app.future"):
-                pytest.fail(f"{module_path} imports {node.module}, but Part 1 runtime must not use app.future")
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.module
+                and node.module.startswith("app.future")
+            ):
+                pytest.fail(
+                    f"{module_path} imports {node.module}, but Part 1 runtime must not use app.future"
+                )
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name.startswith("app.future"):
-                        pytest.fail(f"{module_path} imports {alias.name}, but Part 1 runtime must not use app.future")
+                        pytest.fail(
+                            f"{module_path} imports {alias.name}, but Part 1 runtime must not use app.future"
+                        )

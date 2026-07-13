@@ -15,6 +15,10 @@ unless the database was empty at the start of this run (i.e. this run is
 itself acting as the baseline) — in that baseline case nothing is sent
 unless --notify-existing is also given, per the "don't notify on first
 run" requirement.
+
+This command runs one cycle and exits; app/poller.py wraps it (in spirit —
+poller calls the same collect/dedup/send logic directly) in a recurring
+loop for local continuous operation.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ import argparse
 import logging
 import sys
 
-from app.collector import CollectorError, EmptyWidgetError, fetch_records
+from app.collector import CollectorError, fetch_records
 from app.commands._shared import record_preview
 from app.config import load_settings
 from app.database import open_database
@@ -36,8 +40,12 @@ logger = logging.getLogger(__name__)
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true", help="report only, no DB writes, no sends")
-    parser.add_argument("--send", action="store_true", help="attempt Telegram delivery for new records")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="report only, no DB writes, no sends"
+    )
+    parser.add_argument(
+        "--send", action="store_true", help="attempt Telegram delivery for new records"
+    )
     parser.add_argument(
         "--notify-existing",
         action="store_true",
@@ -51,20 +59,58 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings()
     configure_logging(settings.log_level)
 
-    try:
-        result = fetch_records()
-    except EmptyWidgetError as exc:
-        print(f"FAILED: {exc}", file=sys.stderr)
-        return 1
-    except CollectorError as exc:
-        print(f"FAILED: {exc}", file=sys.stderr)
-        return 1
+    if args.dry_run:
+        # Fully read-only: not even a run_history row is written.
+        try:
+            result = fetch_records()
+        except CollectorError as exc:
+            print(f"FAILED: {exc}", file=sys.stderr)
+            return 1
 
-    print(f"selected method     : {result.method}")
-    print(f"records fetched      : {result.fetched_count}")
-    print(f"full text confirmed  : {result.full_text_confirmed}")
+        print(f"selected method     : {result.method}")
+        print(f"records fetched      : {result.fetched_count}")
+        print(f"full text confirmed  : {result.full_text_confirmed}")
 
+        with open_database(settings.database_path) as db:
+            was_empty = db.is_empty
+            new_records = [r for r in result.records if not db.is_known(r)]
+            duplicate_records = [r for r in result.records if db.is_known(r)]
+
+        print(f"new records          : {len(new_records)}")
+        print(f"duplicate records     : {len(duplicate_records)}")
+
+        will_notify_baseline = was_empty and args.notify_existing
+        to_send_preview = new_records if (not was_empty or will_notify_baseline) else []
+        print("records that would be sent to Telegram:")
+        if not to_send_preview:
+            print("  (none)")
+        else:
+            for record in to_send_preview:
+                print(f"  {record_preview(record)}")
+
+        print("dry-run: no database writes, no Telegram sends performed.")
+        return 0
+
+    return run_poll_cycle(settings, send=args.send, notify_existing=args.notify_existing)
+
+
+def run_poll_cycle(settings, *, send: bool, notify_existing: bool) -> int:
+    """Execute one real (non-dry-run) poll cycle. Used by both the CLI and app/poller.py."""
     with open_database(settings.database_path) as db:
+        run_id = db.start_run("poll_once")
+
+        try:
+            result = fetch_records()
+        except CollectorError as exc:
+            db.record_poll_error(str(exc))
+            db.finish_run(run_id, status="failed", detail=str(exc), store_successful_noop_runs=True)
+            print(f"FAILED: {exc}", file=sys.stderr)
+            return 1
+
+        print(f"selected method     : {result.method}")
+        print(f"records fetched      : {result.fetched_count}")
+        print(f"full text confirmed  : {result.full_text_confirmed}")
+
         was_empty = db.is_empty
 
         new_records: list[DisasterMessageRecord] = []
@@ -78,22 +124,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"new records          : {len(new_records)}")
         print(f"duplicate records     : {len(duplicate_records)}")
 
-        will_notify_baseline = was_empty and args.notify_existing
-        to_send_preview = new_records if (not was_empty or will_notify_baseline) else []
-
-        print("records that would be sent to Telegram:")
-        if not to_send_preview:
-            print("  (none)")
-        else:
-            for record in to_send_preview:
-                print(f"  {record_preview(record)}")
-
-        if args.dry_run:
-            print("dry-run: no database writes, no Telegram sends performed.")
-            return 0
-
-        run_id = db.start_run("poll_once")
-
         is_baseline_run = was_empty
         for record in new_records:
             db.insert(record, is_baseline=is_baseline_run)
@@ -101,11 +131,17 @@ def main(argv: list[str] | None = None) -> int:
         sent_count = 0
         failed_count = 0
 
-        if args.send:
-            should_send_new = (not is_baseline_run) or args.notify_existing
+        if send:
+            should_send_new = (not is_baseline_run) or notify_existing
             send_targets: list[DisasterMessageRecord] = list(new_records) if should_send_new else []
-
             retry_records = db.pending_retry_records() if not is_baseline_run else []
+
+            print("records that would be sent to Telegram:")
+            if not (send_targets or retry_records):
+                print("  (none)")
+            else:
+                for record in [*send_targets, *retry_records]:
+                    print(f"  {record_preview(record)}")
 
             if send_targets or retry_records:
                 with TelegramSender(settings) as sender:
@@ -120,12 +156,15 @@ def main(argv: list[str] | None = None) -> int:
                             sent_count += 1
                         elif outcome.status == TelegramStatus.TELEGRAM_FAILED:
                             failed_count += 1
-                            logger.error("Telegram send failed for %s: %s", record.source_id, outcome.error)
-            elif not is_baseline_run or args.notify_existing:
+                            logger.error(
+                                "Telegram send failed for %s: %s", record.source_id, outcome.error
+                            )
+            else:
                 print("nothing to send.")
-        elif is_baseline_run and not args.notify_existing:
+        elif is_baseline_run and not notify_existing:
             print("this run established the baseline; nothing sent to Telegram by default.")
 
+        db.record_poll_success(found_new=len(new_records) > 0)
         db.finish_run(
             run_id,
             status="ok",
@@ -134,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
             duplicate_count=len(duplicate_records),
             sent_count=sent_count,
             failed_count=failed_count,
+            store_successful_noop_runs=settings.store_successful_noop_runs,
         )
 
     print(f"sent: {sent_count}, failed: {failed_count}")

@@ -83,7 +83,9 @@ def test_pending_retry_records_excludes_sent_and_baseline(db, make_record):
 
     failed = make_record(source_id="DS-FAILED")
     db.insert(failed)
-    db.update_telegram_result(failed.internal_id, status=TelegramStatus.TELEGRAM_FAILED, message_id=None)
+    db.update_telegram_result(
+        failed.internal_id, status=TelegramStatus.TELEGRAM_FAILED, message_id=None
+    )
 
     pending_ids = {r.source_id for r in db.pending_retry_records()}
     assert pending_ids == {"DS-FAILED"}

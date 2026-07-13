@@ -5,7 +5,6 @@ import re
 import httpx
 import pytest
 
-from app.config import Settings
 from app.models import TelegramStatus
 from app.telegram_sender import (
     TELEGRAM_MESSAGE_LIMIT,
@@ -15,6 +14,7 @@ from app.telegram_sender import (
     escape_markdown_v2,
     split_message,
 )
+from tests.conftest import build_settings as make_settings
 
 _MARKDOWN_V2_SPECIAL_PATTERN = re.compile(r"(?<!\\)[_*\[\]()~`>#+=|{}.!-]")
 
@@ -27,20 +27,9 @@ def assert_no_unescaped_markdown_v2(text: str) -> None:
     rejected with HTTP 400 "Character '-' is reserved" on a real send.
     """
     match = _MARKDOWN_V2_SPECIAL_PATTERN.search(text)
-    assert match is None, f"unescaped MarkdownV2 char {match.group()!r} at {match.start()} in: {text!r}"
-
-
-def make_settings(**overrides) -> Settings:
-    defaults = dict(
-        telegram_bot_token="TEST_TOKEN",
-        telegram_chat_id="TEST_CHAT",
-        telegram_allowed_user_ids=(),
-        telegram_send_enabled=True,
-        database_path=None,
-        log_level="INFO",
+    assert match is None, (
+        f"unescaped MarkdownV2 char {match.group()!r} at {match.start()} in: {text!r}"
     )
-    defaults.update(overrides)
-    return Settings(**defaults)
 
 
 def test_escape_markdown_v2_escapes_reserved_characters():
@@ -103,7 +92,9 @@ def test_split_message_does_not_break_escape_sequence():
 
 def test_telegram_disabled_mode_skips_send(make_record):
     settings = make_settings(telegram_send_enabled=False)
-    sender = TelegramSender(settings, client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))))
+    sender = TelegramSender(
+        settings, client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    )
     outcome = sender.send_record(make_record())
     assert outcome.status == TelegramStatus.TELEGRAM_PENDING
     assert outcome.message_ids == []
@@ -112,7 +103,9 @@ def test_telegram_disabled_mode_skips_send(make_record):
 
 def test_telegram_missing_config_raises(make_record):
     settings = make_settings(telegram_bot_token="", telegram_chat_id="")
-    sender = TelegramSender(settings, client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))))
+    sender = TelegramSender(
+        settings, client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    )
     with pytest.raises(TelegramPermanentError):
         sender.send_record(make_record())
     sender.close()

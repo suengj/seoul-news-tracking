@@ -1,4 +1,4 @@
-# Architecture — Part 1
+# Architecture
 
 ## Flow
 
@@ -10,15 +10,27 @@
  app/collector.py  ──►  app/parser.py  (validate schema, parse full-text records)
         │
         ▼
- app/database.py  (SQLite: dedup by source_id, fallback SHA-256 raw_hash; history)
+ app/database.py  (SQLite: dedup by source_id/raw_hash/tombstone; history; system_state)
         │
-        ▼  (new, non-baseline records only, when --send is passed)
+        ▼  (new, non-baseline records only, when send is enabled)
  app/telegram_sender.py  ──►  Telegram Bot API sendMessage
+
+ [Telegram user]
+        │  /latest /status /pause /resume /help
+        ▼
+ app/telegram_bot.py  (long-poll getUpdates, authorize, dispatch)
+        │                       │
+        ▼                       ▼
+ app/database.py (read)   app/database.py (system_state: pause/resume)
 ```
 
-Everything above is driven by one-shot CLI commands in `app/commands/`; there
-is no long-running process or scheduler in Part 1 (that is explicitly
-deferred — see `app/future/scheduler.py`).
+One-shot CLI commands (`discover_source`, `establish_baseline`, `poll_once`,
+`send_telegram_test`, `database_status`, `cleanup_database`) each run once
+and exit. Two long-running local processes layer on top for continuous
+local testing: `app/poller.py` (recurring collect/dedup/send loop, pause-
+aware) and `app/telegram_bot.py` (inbound command handling) — see
+`docs/local_runtime.md`. There is still no production scheduler/VPS/
+Cloudflare deployment (deferred — see `app/future/scheduler.py`).
 
 ## Modules
 
@@ -34,16 +46,31 @@ deferred — see `app/future/scheduler.py`).
 - `app/parser.py` — validates the JSON shape and turns each `sms[]` entry
   into a `DisasterMessageRecord`, rejecting anything missing the documented
   full-text field, timestamp, or sender.
-- `app/database.py` — SQLite persistence: a `messages` table (dedup key:
-  `source_id` OR `raw_hash`, both unique-checked) and a `run_history` table
-  for basic collection/delivery history.
-- `app/telegram_sender.py` — builds the Part 1 message format, escapes
-  MarkdownV2, splits long messages safely, and retries only
-  network/429/5xx failures a bounded number of times.
+- `app/database.py` — SQLite persistence: `messages` (dedup key: `source_id`
+  OR `raw_hash`, plus `tombstones` for deleted-but-remembered records),
+  `run_history` (collection/delivery history, with noop suppression and
+  retention), and `system_state` (pause/resume, last-poll health,
+  last-cleanup timestamp — a single-row table). WAL mode, `busy_timeout`,
+  and bounded write retries make it safe for two local processes to share.
+- `app/telegram_sender.py` — builds the outbound new-alert message format,
+  escapes MarkdownV2, splits long messages safely, retries only
+  network/429/5xx failures a bounded number of times, and separately
+  supports direct inbound-command replies (arbitrary chat id +
+  reply-to-message, independent of `TELEGRAM_SEND_ENABLED`).
+- `app/telegram_bot.py` — long-polls `getUpdates`, authorizes by Telegram
+  user ID against `TELEGRAM_ALLOWED_USER_IDS`, and dispatches
+  `/latest`/`/status`/`/pause`/`/resume`/`/help`/dev-only `/shutdown`. Never
+  initiates a SafeCity request itself.
+- `app/poller.py` — the recurring local collect/dedup/send loop; checks
+  `system_state.polling_enabled` every cycle, skips the SafeCity request
+  while paused, and triggers retention cleanup on its own schedule.
+- `app/process_lock.py` — a small POSIX advisory-file single-instance lock
+  used by `run_telegram_bot` and `run_local` to refuse a duplicate worker.
 - `app/commands/*` — thin CLI wrappers; see README for usage. All side
   effects (DB writes, Telegram sends) are explicit and gated by flags.
-- `app/future/*` — inactive stubs for Part 2+ responsibilities. A static
-  test (`tests/test_future_placeholders.py`) asserts no Part 1 runtime
+- `app/future/*` — inactive stubs for later responsibilities (AI drafting,
+  classification, approval workflow, X publishing, production scheduling).
+  A static test (`tests/test_future_placeholders.py`) asserts no runtime
   module imports them.
 
 ## Why SQLite, why this dedup strategy

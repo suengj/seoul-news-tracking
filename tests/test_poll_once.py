@@ -47,9 +47,7 @@ def env_setup(tmp_path, monkeypatch):
 def _records(*ids):
     out = []
     for i, source_id in enumerate(ids):
-        out.append(
-            _make_bare_record(source_id, i)
-        )
+        out.append(_make_bare_record(source_id, i))
     return out
 
 

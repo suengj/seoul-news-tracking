@@ -53,7 +53,9 @@ def _validate_record_shape(raw: dict[str, Any]) -> None:
         raise SourceDataError("record field 'smsMsg' (complete message body) is empty")
 
 
-def parse_response(payload: Any, source_url: str, detected_at: datetime) -> list[DisasterMessageRecord]:
+def parse_response(
+    payload: Any, source_url: str, detected_at: datetime
+) -> list[DisasterMessageRecord]:
     """Validate the top-level response shape and parse every record.
 
     Raises SourceSchemaError for structural problems (not a dict, missing/
@@ -63,7 +65,9 @@ def parse_response(payload: Any, source_url: str, detected_at: datetime) -> list
     data" requirement.
     """
     if not isinstance(payload, dict):
-        raise SourceSchemaError(f"expected a JSON object at top level, got {type(payload).__name__}")
+        raise SourceSchemaError(
+            f"expected a JSON object at top level, got {type(payload).__name__}"
+        )
 
     if "sms" not in payload:
         raise SourceSchemaError("response missing top-level 'sms' key")

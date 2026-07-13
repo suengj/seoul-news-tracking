@@ -105,3 +105,134 @@ def test_run_history_tracks_counts(db):
     assert row["status"] == "ok"
     assert row["new_count"] == 2
     assert row["duplicate_count"] == 3
+
+
+# --- Service v1: template previews / decisions / AI generations --------------
+
+
+def test_insert_and_get_preview_roundtrip(db, make_record):
+    record = make_record(source_id="DS1")
+    db.insert(record)
+    preview_id = db.insert_preview(
+        message_id=record.internal_id,
+        selected_template_id="HEAVY_RAIN_CLEARED",
+        selected_by=111,
+        extraction_method="rule",
+        extracted_slots_json="{}",
+        rendered_text="렌더된 문안",
+        missing_slots_json="[]",
+        status="rule_preview",
+    )
+    preview = db.get_preview(preview_id)
+    assert preview.message_id == record.internal_id
+    assert preview.status == "rule_preview"
+    assert preview.rendered_text == "렌더된 문안"
+
+
+def test_update_preview_status_updates_fields(db, make_record):
+    record = make_record(source_id="DS1")
+    db.insert(record)
+    preview_id = db.insert_preview(
+        message_id=record.internal_id,
+        selected_template_id="HEAVY_RAIN_CLEARED",
+        selected_by=111,
+        extraction_method="rule",
+        extracted_slots_json="{}",
+        rendered_text=None,
+        missing_slots_json='["지역"]',
+        status="rule_preview",
+    )
+    db.update_preview_status(preview_id, status="cancelled")
+    preview = db.get_preview(preview_id)
+    assert preview.status == "cancelled"
+    # Fields not passed to update_preview_status are preserved.
+    assert preview.missing_slots_json == '["지역"]'
+
+
+def test_upsert_decision_creates_then_updates_in_place(db, make_record):
+    record = make_record(source_id="DS1")
+    db.insert(record)
+    decision_id_1 = db.upsert_decision(
+        message_id=record.internal_id,
+        preview_id=1,
+        final_template_id="HEAVY_RAIN_CLEARED",
+        final_slots_json="{}",
+        final_rendered_text="첫 번째 문안",
+        generation_method="rule",
+        confirmed_by=111,
+    )
+    decision_id_2 = db.upsert_decision(
+        message_id=record.internal_id,
+        preview_id=2,
+        final_template_id="FLOOD_ADVISORY_ISSUED",
+        final_slots_json="{}",
+        final_rendered_text="두 번째 문안",
+        generation_method="ai",
+        confirmed_by=222,
+    )
+    assert decision_id_1 == decision_id_2  # same row, updated in place
+    assert db._conn.execute("SELECT COUNT(*) AS c FROM template_decisions").fetchone()["c"] == 1
+    row = db.get_decision_by_message_id(record.internal_id)
+    assert row["final_template_id"] == "FLOOD_ADVISORY_ISSUED"
+    assert row["generation_method"] == "ai"
+    assert row["confirmed_by"] == 222
+
+
+def test_ai_generation_insert_and_update(db, make_record):
+    record = make_record(source_id="DS1")
+    db.insert(record)
+    gen_id = db.insert_ai_generation(
+        message_id=record.internal_id,
+        selected_template_id="FLOOD_ADVISORY_ISSUED",
+        requested_by=111,
+        model="gpt-5-mini",
+        prompt_version="v1",
+        request_slots_json="{}",
+    )
+    row = db._conn.execute(
+        "SELECT * FROM ai_generations WHERE ai_generation_id = ?", (gen_id,)
+    ).fetchone()
+    assert row["status"] == "requested"
+
+    db.update_ai_generation(gen_id, status="succeeded", input_tokens=10, output_tokens=20)
+    row = db._conn.execute(
+        "SELECT * FROM ai_generations WHERE ai_generation_id = ?", (gen_id,)
+    ).fetchone()
+    assert row["status"] == "succeeded"
+    assert row["input_tokens"] == 10
+
+
+def test_processed_callback_queries_guard(db):
+    assert db.has_processed_callback("cbq-1") is False
+    db.mark_callback_processed("cbq-1")
+    assert db.has_processed_callback("cbq-1") is True
+    # Idempotent: marking twice must not raise.
+    db.mark_callback_processed("cbq-1")
+
+
+def test_confirmed_decision_survives_message_retention_cleanup(db, make_record):
+    """A confirmed template_decisions row must outlive `messages` retention
+    cleanup — message_id columns on template_* tables are deliberately not
+    enforced foreign keys (see app/database.py module docstring)."""
+    old_sent_at = datetime(2020, 1, 1, tzinfo=SEOUL_TZ)
+    record = make_record(source_id="DS-OLD", sent_at=old_sent_at)
+    db.insert(record)
+    db.upsert_decision(
+        message_id=record.internal_id,
+        preview_id=1,
+        final_template_id="HEAVY_RAIN_CLEARED",
+        final_slots_json="{}",
+        final_rendered_text="보관될 문안",
+        generation_method="rule",
+        confirmed_by=111,
+    )
+
+    # Must not raise sqlite3.IntegrityError (FOREIGN KEY constraint failed).
+    db.cleanup_execute(
+        message_retention_days=1, run_history_retention_days=14, tombstone_retention_days=365
+    )
+
+    assert db._conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 0
+    row = db.get_decision_by_message_id(record.internal_id)
+    assert row is not None
+    assert row["final_rendered_text"] == "보관될 문안"

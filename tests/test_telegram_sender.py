@@ -5,14 +5,22 @@ import re
 import httpx
 import pytest
 
-from app.config import Settings
 from app.models import TelegramStatus
 from app.telegram_sender import (
     TELEGRAM_MESSAGE_LIMIT,
     TelegramPermanentError,
     TelegramSender,
+    build_confirmation_message,
     build_message,
+    build_preview_complete_message,
+    build_preview_incomplete_message,
+    build_selection_keyboard,
+    build_template_alert_message,
     escape_markdown_v2,
+    make_callback_data,
+    make_preview_callback_data,
+    parse_callback_data,
+    parse_preview_callback_data,
     split_message,
 )
 
@@ -28,19 +36,6 @@ def assert_no_unescaped_markdown_v2(text: str) -> None:
     """
     match = _MARKDOWN_V2_SPECIAL_PATTERN.search(text)
     assert match is None, f"unescaped MarkdownV2 char {match.group()!r} at {match.start()} in: {text!r}"
-
-
-def make_settings(**overrides) -> Settings:
-    defaults = dict(
-        telegram_bot_token="TEST_TOKEN",
-        telegram_chat_id="TEST_CHAT",
-        telegram_allowed_user_ids=(),
-        telegram_send_enabled=True,
-        database_path=None,
-        log_level="INFO",
-    )
-    defaults.update(overrides)
-    return Settings(**defaults)
 
 
 def test_escape_markdown_v2_escapes_reserved_characters():
@@ -101,7 +96,7 @@ def test_split_message_does_not_break_escape_sequence():
         assert not chunk.endswith("\\")
 
 
-def test_telegram_disabled_mode_skips_send(make_record):
+def test_telegram_disabled_mode_skips_send(make_record, make_settings):
     settings = make_settings(telegram_send_enabled=False)
     sender = TelegramSender(settings, client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))))
     outcome = sender.send_record(make_record())
@@ -110,7 +105,7 @@ def test_telegram_disabled_mode_skips_send(make_record):
     sender.close()
 
 
-def test_telegram_missing_config_raises(make_record):
+def test_telegram_missing_config_raises(make_record, make_settings):
     settings = make_settings(telegram_bot_token="", telegram_chat_id="")
     sender = TelegramSender(settings, client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))))
     with pytest.raises(TelegramPermanentError):
@@ -118,7 +113,7 @@ def test_telegram_missing_config_raises(make_record):
     sender.close()
 
 
-def test_telegram_successful_send_stores_message_id(make_record):
+def test_telegram_successful_send_stores_message_id(make_record, make_settings):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"ok": True, "result": {"message_id": 42}})
 
@@ -130,7 +125,7 @@ def test_telegram_successful_send_stores_message_id(make_record):
     sender.close()
 
 
-def test_telegram_permanent_failure_marks_failed(make_record):
+def test_telegram_permanent_failure_marks_failed(make_record, make_settings):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, text="Bad Request: chat not found")
 
@@ -142,7 +137,7 @@ def test_telegram_permanent_failure_marks_failed(make_record):
     sender.close()
 
 
-def test_telegram_retries_temporary_failure_then_succeeds(make_record, monkeypatch):
+def test_telegram_retries_temporary_failure_then_succeeds(make_record, monkeypatch, make_settings):
     calls = {"count": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -160,7 +155,7 @@ def test_telegram_retries_temporary_failure_then_succeeds(make_record, monkeypat
     sender.close()
 
 
-def test_telegram_does_not_retry_indefinitely(make_record, monkeypatch):
+def test_telegram_does_not_retry_indefinitely(make_record, monkeypatch, make_settings):
     calls = {"count": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -175,3 +170,133 @@ def test_telegram_does_not_retry_indefinitely(make_record, monkeypatch):
     # MAX_SEND_RETRIES=2 -> at most 3 attempts, not unbounded.
     assert calls["count"] == 3
     sender.close()
+
+
+# --- Service v1: send_text / send_plain_text ---------------------------------
+
+
+def test_send_text_ignores_send_enabled_flag(make_settings):
+    """A direct reply to an inbound command must go out even with
+    TELEGRAM_SEND_ENABLED=false — that flag only gates automatic alerts."""
+    settings = make_settings(telegram_send_enabled=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    sender = TelegramSender(settings, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    outcome = sender.send_text("답변", chat_id=999, reply_to_message_id=5)
+    assert outcome.status == TelegramStatus.TELEGRAM_SENT
+    sender.close()
+
+
+def test_send_plain_text_honors_send_enabled_flag(make_settings):
+    settings = make_settings(telegram_send_enabled=False)
+    sender = TelegramSender(
+        settings, client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    )
+    outcome = sender.send_plain_text("초안 문안")
+    assert outcome.status == TelegramStatus.TELEGRAM_PENDING
+    sender.close()
+
+
+def test_send_plain_text_attaches_keyboard_only_to_last_chunk(make_settings):
+    payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(dict(httpx.QueryParams(request.content.decode())))
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": len(payloads)}})
+
+    settings = make_settings()
+    sender = TelegramSender(settings, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    long_text = "\n".join(f"line {i} " + ("x" * 60) for i in range(100))
+    keyboard = {"inline_keyboard": [[{"text": "✅ 최종 OK", "callback_data": "preview:1:confirm"}]]}
+    outcome = sender.send_plain_text(long_text, reply_markup=keyboard)
+    assert outcome.status == TelegramStatus.TELEGRAM_SENT
+    assert len(payloads) > 1
+    assert "reply_markup" not in payloads[0]
+    assert "reply_markup" in payloads[-1]
+    sender.close()
+
+
+# --- Service v1: callback data ------------------------------------------------
+
+
+def test_make_and_parse_callback_data_roundtrip():
+    data = make_callback_data(42, "HEAVY_RAIN_CLEARED")
+    assert len(data.encode("utf-8")) <= 64
+    assert parse_callback_data(data) == (42, "HEAVY_RAIN_CLEARED")
+
+
+def test_parse_callback_data_rejects_malformed():
+    assert parse_callback_data("garbage") is None
+    assert parse_callback_data("tpl:not-an-int:rain_clr") is None
+    assert parse_callback_data("tpl:1:unknown_code") is None
+
+
+def test_make_and_parse_preview_callback_data_roundtrip():
+    for action in ("confirm", "cancel", "ai"):
+        data = make_preview_callback_data(7, action)
+        assert len(data.encode("utf-8")) <= 64
+        assert parse_preview_callback_data(data) == (7, action)
+
+
+def test_parse_preview_callback_data_rejects_malformed():
+    assert parse_preview_callback_data("preview:1:explode") is None
+    assert parse_preview_callback_data("tpl:1:confirm") is None
+
+
+# --- Service v1: keyboard / message builders ---------------------------------
+
+
+def test_build_selection_keyboard_has_eight_buttons_no_primary_recommendation():
+    keyboard = build_selection_keyboard(message_id=1)
+    rows = keyboard["inline_keyboard"]
+    all_buttons = [button for row in rows for button in row]
+    assert len(all_buttons) == 8
+    labels = {button["text"] for button in all_buttons}
+    assert "📄 원문" in labels
+    # No button text implies an automatic recommendation.
+    assert not any("추천" in label for label in labels)
+
+
+def test_build_template_alert_message_shows_recommendation_only_as_secondary_line(make_record):
+    from app.template_rules import TemplateSuggestion
+
+    record = make_record(body="오늘 18시 기준 중랑천에 홍수주의보가 발령되었습니다.")
+    recommended = TemplateSuggestion(template_id="FLOOD_ADVISORY_ISSUED", rule_score=1.0)
+    text = build_template_alert_message(record, recommended)
+    assert "사용할 템플릿을 선택해 주세요." in text
+    assert "실험적 추천" in text
+    # The secondary hint must come after the primary call-to-action line.
+    assert text.index("사용할 템플릿을 선택해 주세요.") < text.index("실험적 추천")
+
+
+def test_build_template_alert_message_without_recommendation(make_record):
+    record = make_record(body="관련 없는 문구")
+    text = build_template_alert_message(record, None)
+    assert "실험적 추천" not in text
+
+
+def test_build_preview_complete_message_lists_slots_and_rendered_text():
+    from app.template_extractors import SlotValue
+
+    slots = {"지역": SlotValue(value="서울", source="sender_or_region", evidence="서울", confidence=1.0)}
+    text = build_preview_complete_message("HEAVY_RAIN_CLEARED", "rule", slots, "렌더된 문안")
+    assert "[템플릿 초안]" in text
+    assert "Rule" in text
+    assert "- 지역: 서울" in text
+    assert "렌더된 문안" in text
+
+
+def test_build_preview_incomplete_message_never_shows_confirm_button_implied():
+    text = build_preview_incomplete_message("FLOOD_ADVISORY_ISSUED", {}, ["하천명"], "원문 내용")
+    assert "[템플릿 작성 미완료]" in text
+    assert "누락 필드:" in text
+    assert "하천명" in text
+    assert "원문 내용" in text
+
+
+def test_build_confirmation_message():
+    text = build_confirmation_message("HEAVY_RAIN_CLEARED", "최종 문안입니다")
+    assert "[최종 확정 완료]" in text
+    assert "최종 문안입니다" in text

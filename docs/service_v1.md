@@ -1,0 +1,100 @@
+# Service v1: human-first template selection
+
+Service v1 integrates the recurring local poller and Telegram command bot
+(previously a separate branch) with the deterministic template engine
+(previously another separate branch) into one small, compact runtime. The
+core product decision: **a human always picks the template.** The system
+never auto-selects, auto-renders-and-sends, or auto-confirms anything.
+
+## The flow
+
+```
+1. Poller collects a genuinely new Seoul SafeCity message (every
+   POLL_INTERVAL_SECONDS, default 300s).
+2. The message is stored, then sent to Telegram as-is, with 8 equal-weight
+   buttons: the 7 templates + "📄 원문". A small secondary line may show
+   "실험적 추천: ..." (the deterministic rule engine's own guess) but it is
+   never a button, never bold, never the primary action.
+3. An authorized operator reads the original message and taps one button.
+4. The system re-runs deterministic extraction against the *original* body
+   for the selected template, renders it if possible, and sends a preview:
+     - complete  -> [✅ 최종 OK] [↩️ 취소] [🤖 AI로 작성]
+     - incomplete -> [↩️ 취소] [🤖 AI로 작성]     (no OK button at all)
+   (the AI button is omitted entirely when AI_ENABLED=false)
+5. ✅ 최종 OK -> writes one row to `template_decisions` (see below) and
+   replies with a confirmation. This is the only action that ever produces
+   a decision.
+6. ↩️ 취소 -> marks the preview cancelled and resends the original body with
+   the same 8 selection buttons, so the operator can try a different
+   template. Previous messages are never edited or deleted.
+7. 🤖 AI로 작성 -> calls OpenAI (only now, only for the template the human
+   already picked) to re-extract the same slots; on success this produces a
+   *new* preview with only [✅ 최종 OK] [↩️ 취소] (AI never re-offers itself).
+```
+
+## Action vs. preview vs. decision
+
+Three different database tables exist because they answer three different
+questions, and conflating them was the main thing this integration fixed:
+
+| Table | Answers | Written by |
+|---|---|---|
+| `template_actions` | "which button did the operator press, and did the reply actually send?" | every template-selection tap |
+| `template_previews` | "what did we show, and is it currently confirmable?" | every selection tap (rule) and every AI attempt that succeeds |
+| `template_decisions` | "what is the current authoritative, confirmed final text for this message?" | only an explicit ✅ 최종 OK |
+
+A template button press or a cancellation is **never** treated as a final
+label — only `template_decisions` is future automation ground truth.
+Re-confirming a different preview for the same message updates the existing
+`template_decisions` row in place (`message_id` is `UNIQUE`); the full
+history of what was tried is still reconstructable from `template_previews`
+alone, so no separate decision-history table was added (see
+`docs/database_retention.md` for why these tables are also exempt from
+message retention cleanup).
+
+## Rule extraction vs. on-demand AI
+
+- **Rule** (`app/template_rules.py`, `app/template_extractors.py`,
+  `app/template_renderer.py`): deterministic regex/dictionary logic, no ML,
+  runs automatically the moment a template is selected. See
+  `docs/template_engine.md`.
+- **AI** (`app/ai_client.py`): only called when the operator explicitly taps
+  "🤖 AI로 작성". The template is already fixed by the human at that point —
+  AI extracts that template's declared slots only, never picks a different
+  template, never writes the fixed YAML wording itself, and its output is
+  always pushed back through the same `render_template()` the Rule path
+  uses (see "On-demand AI" below).
+
+## On-demand AI
+
+- `AI_ENABLED=false` (default) hides the AI button entirely.
+- When enabled, `app/ai_client.py` calls OpenAI's structured-output API
+  (`client.chat.completions.parse(response_format=<pydantic model>)`),
+  verified against the current official docs
+  (`developers.openai.com/api/docs/guides/structured-outputs`). Every
+  returned slot must declare `evidence` that is actually a substring of the
+  original message text (whitespace-normalized); an undeclared slot name,
+  a changed `template_id`, a missing/unverifiable evidence string, or a
+  still-missing required slot all fail validation (`status=validation_failed`)
+  rather than producing a draft.
+- Every attempt — success or failure — is logged in `ai_generations`
+  (model, prompt version, token counts, status, error; never the API key).
+- **API-key note**: the real `OPENAI_API_KEY` is provided separately by the
+  operator. Until it is supplied, `AI_ENABLED` stays `false` and only
+  mocked-client tests exercise this path (see `tests/test_ai_client.py`) —
+  live AI extraction is explicitly reported as pending in the completion
+  report, not silently assumed to work.
+
+## Known limitations
+
+- Exactly one preview per (message, operator) isn't hard-enforced — the
+  buttons on an older preview for the same message remain technically
+  clickable after a newer one is created. Deliberately not hardened further
+  (see `docs/telegram_template_flow.md`) — "do not overengineer versioning."
+- The rule engine's "실험적 추천" hint uses the same signal-group scoring as
+  before; it is cosmetic-only now and never gates or auto-fills anything.
+
+## Next phase (not in this session)
+
+Server/VPS deployment, HTTPS webhook instead of long-polling, and live AI
+validation once `OPENAI_API_KEY` is supplied.

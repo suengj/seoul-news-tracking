@@ -1,4 +1,4 @@
-# Architecture — Part 1
+# Architecture
 
 ## Flow
 
@@ -10,15 +10,34 @@
  app/collector.py  ──►  app/parser.py  (validate schema, parse full-text records)
         │
         ▼
- app/database.py  (SQLite: dedup by source_id, fallback SHA-256 raw_hash; history)
+ app/database.py  (SQLite: dedup by source_id/raw_hash/tombstone; history; system_state)
         │
-        ▼  (new, non-baseline records only, when --send is passed)
- app/telegram_sender.py  ──►  Telegram Bot API sendMessage
+        ▼  (new, non-baseline records only, when send is enabled)
+ app/template_flow.py::build_initial_alert  ──►  Telegram: original text + 8-button selector
+
+ [Telegram operator]
+        │  /latest /status /pause /resume /help     │  taps a template / preview button
+        ▼                                            ▼
+ app/telegram_bot.py  (one getUpdates loop, authorize, dispatch)
+        │                       │                    │
+        ▼                       ▼                    ▼
+ app/database.py (read)   system_state (pause/resume)  app/template_flow.py
+                                                        (rule extraction, YAML render,
+                                                         on-demand app/ai_client.py,
+                                                         template_previews/decisions)
 ```
 
-Everything above is driven by one-shot CLI commands in `app/commands/`; there
-is no long-running process or scheduler in Part 1 (that is explicitly
-deferred — see `app/future/scheduler.py`).
+One-shot CLI commands (`discover_source`, `establish_baseline`, `poll_once`,
+`send_telegram_test`, `database_status`, `cleanup_database`,
+`analyze_template_patterns`, `test_template`) each run once and exit. Two
+long-running local processes layer on top for continuous local testing:
+`app/poller.py` (recurring collect/dedup/send loop, pause-aware) and
+`app/telegram_bot.py` (one process handling both inbound commands and every
+inline-button callback) — see `docs/local_runtime.md`. There is still no
+production scheduler/VPS/Cloudflare deployment (deferred — see
+`app/future/scheduler.py`). The human-first template selection/preview/
+confirm/cancel/AI flow itself is described in `docs/service_v1.md` and
+`docs/telegram_template_flow.md`; it is not shown expanded above.
 
 ## Modules
 
@@ -34,17 +53,42 @@ deferred — see `app/future/scheduler.py`).
 - `app/parser.py` — validates the JSON shape and turns each `sms[]` entry
   into a `DisasterMessageRecord`, rejecting anything missing the documented
   full-text field, timestamp, or sender.
-- `app/database.py` — SQLite persistence: a `messages` table (dedup key:
-  `source_id` OR `raw_hash`, both unique-checked) and a `run_history` table
-  for basic collection/delivery history.
-- `app/telegram_sender.py` — builds the Part 1 message format, escapes
-  MarkdownV2, splits long messages safely, and retries only
-  network/429/5xx failures a bounded number of times.
+- `app/database.py` — SQLite persistence: `messages` (dedup key: `source_id`
+  OR `raw_hash`, plus `tombstones` for deleted-but-remembered records),
+  `run_history` (collection/delivery history, with noop suppression and
+  retention), and `system_state` (pause/resume, last-poll health,
+  last-cleanup timestamp — a single-row table). WAL mode, `busy_timeout`,
+  and bounded write retries make it safe for two local processes to share.
+- `app/telegram_sender.py` — builds the outbound new-alert message format,
+  escapes MarkdownV2, splits long messages safely, retries only
+  network/429/5xx failures a bounded number of times, and separately
+  supports direct inbound-command replies (arbitrary chat id +
+  reply-to-message, independent of `TELEGRAM_SEND_ENABLED`).
+- `app/telegram_bot.py` — one long-polling process, one `getUpdates` offset
+  sequence. Authorizes by Telegram user ID against
+  `TELEGRAM_ALLOWED_USER_IDS`, dispatches
+  `/latest`/`/status`/`/pause`/`/resume`/`/help`/dev-only `/shutdown`, and
+  routes every `callback_query` update to `app/template_flow.py`. Never
+  initiates a SafeCity request itself.
+- `app/poller.py` — the recurring local collect/dedup/send loop; checks
+  `system_state.polling_enabled` every cycle, skips the SafeCity request
+  while paused, and triggers retention cleanup on its own schedule.
+- `app/process_lock.py` — a small POSIX advisory-file single-instance lock
+  used by `run_telegram_bot` and `run_local` to refuse a duplicate worker.
+- `app/template_rules.py` / `app/template_extractors.py` /
+  `app/template_renderer.py` — deterministic rule scoring, slot extraction,
+  and YAML-driven rendering (see `docs/template_engine.md`); no ML.
+- `app/template_flow.py` — the Service v1 orchestration layer: template
+  selection → preview → confirm/cancel/AI, and the duplicate-callback guard
+  (see `docs/service_v1.md`, `docs/telegram_template_flow.md`).
+- `app/ai_client.py` — on-demand OpenAI structured-output slot extraction,
+  called only from `template_flow.py` on an explicit operator request.
 - `app/commands/*` — thin CLI wrappers; see README for usage. All side
   effects (DB writes, Telegram sends) are explicit and gated by flags.
-- `app/future/*` — inactive stubs for Part 2+ responsibilities. A static
-  test (`tests/test_future_placeholders.py`) asserts no Part 1 runtime
-  module imports them.
+- `app/future/*` — inactive stubs for later responsibilities (classification,
+  approval workflow, X publishing, production scheduling). A static test
+  (`tests/test_future_placeholders.py` / `tests/test_pipeline_integration.py`)
+  asserts no runtime module imports them.
 
 ## Why SQLite, why this dedup strategy
 

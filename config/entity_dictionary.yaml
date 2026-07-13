@@ -1,0 +1,15 @@
+version: 1
+
+# Small, human-editable helper dictionary for deterministic slot extraction.
+# This is a helper, not an exhaustive source of truth — see
+# app/template_extractors.py and docs/template_engine.md for how it's used
+# in the extraction priority order (explicit label -> dictionary -> regex).
+rivers:
+  - 한강
+  - 중랑천
+  - 탄천
+  - 안양천
+  - 청계천
+  - 도림천
+  - 홍제천
+  - 불광천

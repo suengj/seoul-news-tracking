@@ -1,0 +1,39 @@
+    
+    <div class="con_box con_box2_2" style="height:calc(100% - 235px); overflow-y: hidden;">
+        <div class="distSmsNews">
+            
+            
+            <div class="table_con" style="height: 48%; display: flex; flex-direction: column; justify-content: space-between;">
+                <div class="table_title">
+                    <h2>재난문자</h2>
+                    <div class="more_btn" style="cursor:pointer;">
+                        <a onclick="LAYER_POPUP.RIGHT_NEWS_TEMPLATE.fn_moreDistMsg(this)">
+                            <p>더보기  +</p>
+                        </a>
+                    </div>
+                </div>
+                <div class="table style_news1" style="overflow-y: scroll;border-top:1px solid #333; height: 650px !important;">
+                    <table>
+                        <caption>재난문자</caption>
+                        <colgroup>
+                            <col style="width: 90px;">
+                            <col style="width: 100%;">
+                        </colgroup>
+                        <tbody id="distMsg">
+                        <tr>
+                            <td class="tal">
+                                <i>
+                                    <img src="/css/assets/images/speaker.svg" alt="재난문자 아이콘">
+                                </i>
+                            </td>
+                            <td class="tal">
+                                <div class="txt">
+                                    <a href="#seoul_common_gnb">오늘 재난문자가 없습니다.</a>
+                                    <p>2026-07-13</p>
+                                </div>
+                            </td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>

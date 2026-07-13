@@ -43,6 +43,30 @@ python -m app.commands.poll_once --send --notify-existing
 # Controlled Telegram connectivity test (never a real disaster message).
 # Requires TELEGRAM_SEND_ENABLED=true in the environment AND --confirm.
 python -m app.commands.send_telegram_test --confirm
+
+# Long-polls Telegram for inline template-button presses (separate process).
+python -m app.commands.run_telegram_bot
+```
+
+### Template recommendation engine
+
+Every new message `poll_once` sends now also gets a deterministic template
+recommendation, a rendered draft (when its required fields can be safely
+extracted), and inline buttons for the 7 templates + original-only. See
+`docs/template_engine.md` and `docs/telegram_inline_templates.md`. No ML,
+embeddings, or LLM calls are involved — see `app/ai_fallback.py` for the
+inactive future placeholder.
+
+```bash
+# Read-only wording analysis of the historical archive (never modifies it,
+# never exports the full dataset) — informs the rules, is not itself used
+# at runtime.
+python -m app.commands.analyze_template_patterns
+
+# Manually run the recommendation pipeline against one message.
+python -m app.commands.test_template --message-id 42
+python -m app.commands.test_template --text "..." --region "서울특별시" \
+    --sent-at "2026-07-14T12:00:00+09:00"
 ```
 
 ### Historical backfill (separate dataset)
@@ -81,6 +105,13 @@ Each record stores: `internal_id`, `source_id`, `sender_or_region`,
 `detected_at`, `raw_hash`, `telegram_status`, `telegram_message_id`, and the
 sanitized `raw_payload`. See `app/models.py` and `app/database.py`.
 
+Two additional tables in the same database support the template engine:
+`template_suggestions` (one row per message: recommended template, rule
+score, candidates, extraction, rendered draft) and `template_actions` (one
+row per inline-button press: selected template, who chose it, re-run
+extraction, rendered/mismatch text, status). Both reference `messages` by
+`internal_id` rather than duplicating the original body.
+
 ## Project layout
 
 ```
@@ -88,6 +119,10 @@ app/            application code (config, models, collector, parser, database, t
 app/commands/   CLI entry points
 app/future/     inactive placeholders for Part 2+ (never imported by Part 1 runtime)
 app/history_*.py  historical backfill collector (separate dataset, see docs/history_*.md)
+app/template_rules.py, app/template_extractors.py, app/template_renderer.py
+                deterministic template recommendation engine (see docs/template_engine.md)
+app/ai_fallback.py  inactive future AI placeholder (raises NotImplementedError; unused)
+config/message_templates.yaml  the 7 templates + ORIGINAL_ONLY/UNKNOWN (human-managed SSOT)
 docs/           source discovery, architecture, Telegram setup, completion report
 artifacts/      small sanitized evidence from source discovery (no secrets)
 tests/          fixture-based tests, no live network dependency

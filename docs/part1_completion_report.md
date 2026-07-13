@@ -157,5 +157,40 @@ that no `app/future/*` placeholder is imported by Part 1 runtime code.
   cookie) are undocumented by Seoul SafeCity and could change without
   notice; `app/collector.py` treats a change here as a hard failure (exit
   non-zero) rather than degrading silently.
-- `TELEGRAM_ALLOWED_USER_IDS` parsing is implemented and tested but has no
-  runtime effect in Part 1, by design.
+- `TELEGRAM_ALLOWED_USER_IDS` parsing was implemented and tested here with no
+  runtime effect yet. It is now load-bearing — see §9 below — as the
+  authorization check for inline template-button callbacks.
+
+## 9. Template recommendation engine (added 2026-07-14)
+
+A second, additive feature: deterministic template suggestion/rendering for
+*live* Seoul SafeCity messages, informed by (but never applied to) the
+5,005-record historical archive from the separate backfill effort. Full
+detail in `docs/template_engine.md` and `docs/telegram_inline_templates.md`;
+historical wording analysis in `docs/template_pattern_analysis.md`.
+
+Summary of what changed:
+
+- `config/message_templates.yaml` — the 7 production templates plus
+  `ORIGINAL_ONLY`/`UNKNOWN`, human-editable, exact wording preserved.
+- `app/template_rules.py`, `app/template_extractors.py`,
+  `app/template_renderer.py` — rule scoring, slot extraction, and rendering.
+  All deterministic; no ML, no embeddings, no LLM calls.
+- `app/commands/analyze_template_patterns.py` — read-only historical wording
+  analysis (never modifies `data/history_raw.db`, never exports the full
+  dataset).
+- `app/commands/test_template.py` — manual single-message pipeline test.
+- `app/commands/run_telegram_bot.py` — long-polls Telegram for inline
+  button callbacks and replies with the selected template's rendered draft.
+- `app/database.py` — added `template_suggestions` and `template_actions`
+  tables to the existing real-time `messages` database (no new database
+  file).
+- `app/telegram_sender.py`, `app/commands/poll_once.py` — new-message sends
+  now include the rule recommendation, a rendered draft (when extractable),
+  and an inline keyboard; template-pipeline failures fall back to a plain
+  "no recommendation" alert rather than blocking delivery.
+- `app/ai_fallback.py` — inactive placeholder only; not imported by any
+  runtime path.
+
+See `docs/template_engine.md` §"Local controlled validation" for the actual
+test/`test_template` output recorded for this change.

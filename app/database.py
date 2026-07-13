@@ -50,6 +50,36 @@ CREATE TABLE IF NOT EXISTS run_history (
     status TEXT NOT NULL,
     detail TEXT
 );
+
+CREATE TABLE IF NOT EXISTS template_suggestions (
+    suggestion_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL REFERENCES messages(internal_id),
+    recommended_template_id TEXT,
+    rule_score REAL,
+    candidates_json TEXT NOT NULL,
+    extraction_json TEXT NOT NULL,
+    rendered_text TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_template_suggestions_message_id
+    ON template_suggestions(message_id);
+
+CREATE TABLE IF NOT EXISTS template_actions (
+    action_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL REFERENCES messages(internal_id),
+    selected_template_id TEXT NOT NULL,
+    selected_by INTEGER NOT NULL,
+    selected_at TEXT NOT NULL,
+    callback_query_id TEXT UNIQUE,
+    extraction_json TEXT,
+    rendered_text TEXT,
+    status TEXT NOT NULL,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_template_actions_message_id
+    ON template_actions(message_id);
 """
 
 
@@ -150,6 +180,84 @@ class Database:
             (status.value, message_id, internal_id),
         )
         self._conn.commit()
+
+    def get_by_internal_id(self, internal_id: int) -> DisasterMessageRecord | None:
+        cur = self._conn.execute("SELECT * FROM messages WHERE internal_id = ?", (internal_id,))
+        row = cur.fetchone()
+        return self._row_to_record(row) if row is not None else None
+
+    def insert_template_suggestion(
+        self,
+        *,
+        message_id: int,
+        recommended_template_id: str | None,
+        rule_score: float | None,
+        candidates_json: str,
+        extraction_json: str,
+        rendered_text: str | None,
+    ) -> int:
+        cur = self._conn.execute(
+            """
+            INSERT INTO template_suggestions (
+                message_id, recommended_template_id, rule_score,
+                candidates_json, extraction_json, rendered_text, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message_id,
+                recommended_template_id,
+                rule_score,
+                candidates_json,
+                extraction_json,
+                rendered_text,
+                datetime.now(tz=SEOUL_TZ).isoformat(),
+            ),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def has_processed_callback(self, callback_query_id: str) -> bool:
+        cur = self._conn.execute(
+            "SELECT 1 FROM template_actions WHERE callback_query_id = ? LIMIT 1",
+            (callback_query_id,),
+        )
+        return cur.fetchone() is not None
+
+    def insert_template_action(
+        self,
+        *,
+        message_id: int,
+        selected_template_id: str,
+        selected_by: int,
+        callback_query_id: str | None,
+        extraction_json: str | None,
+        rendered_text: str | None,
+        status: str,
+        error: str | None = None,
+    ) -> int:
+        """Raises `sqlite3.IntegrityError` if `callback_query_id` was already recorded
+        (duplicate Telegram callback delivery) — caller should catch and skip re-sending."""
+        cur = self._conn.execute(
+            """
+            INSERT INTO template_actions (
+                message_id, selected_template_id, selected_by, selected_at,
+                callback_query_id, extraction_json, rendered_text, status, error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message_id,
+                selected_template_id,
+                selected_by,
+                datetime.now(tz=SEOUL_TZ).isoformat(),
+                callback_query_id,
+                extraction_json,
+                rendered_text,
+                status,
+                error,
+            ),
+        )
+        self._conn.commit()
+        return cur.lastrowid
 
     def start_run(self, run_type: str) -> int:
         cur = self._conn.execute(

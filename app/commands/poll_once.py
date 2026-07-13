@@ -20,18 +20,75 @@ run" requirement.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 
 from app.collector import CollectorError, EmptyWidgetError, fetch_records
 from app.commands._shared import record_preview
-from app.config import load_settings
-from app.database import open_database
+from app.config import Settings, load_settings
+from app.database import Database, open_database
 from app.logging_config import configure_logging
 from app.models import DisasterMessageRecord, TelegramStatus
-from app.telegram_sender import TelegramSender
+from app.telegram_sender import (
+    TelegramSender,
+    TelegramSendOutcome,
+    build_keyboard,
+    build_template_alert_message,
+)
+from app.template_extractors import extract_slots
+from app.template_renderer import render_template
+from app.template_rules import recommend_template
 
 logger = logging.getLogger(__name__)
+
+
+def _send_via_template_pipeline(
+    sender: TelegramSender, db: Database, settings: Settings, record: DisasterMessageRecord
+) -> TelegramSendOutcome:
+    """Suggest/extract/render for `record`, then send one Telegram alert with
+    inline template buttons. Any pipeline failure falls back to a plain
+    "no recommendation" alert — it never blocks delivery of the original
+    message."""
+    recommended = None
+    candidates = []
+    render_result = None
+    extracted_slots: dict = {}
+    try:
+        recommended, candidates = recommend_template(
+            record.original_body,
+            record.sender_or_region,
+            record.sent_at,
+            threshold=settings.template_recommend_threshold,
+        )
+        if recommended is not None:
+            extraction = extract_slots(
+                recommended.template_id, record.original_body, record.sender_or_region, record.sent_at
+            )
+            extracted_slots = extraction.extracted_slots
+            render_result = render_template(recommended.template_id, extracted_slots)
+    except Exception:
+        logger.exception(
+            "template pipeline failed for source_id=%s; sending original with no recommendation",
+            record.source_id,
+        )
+        recommended = None
+        render_result = None
+        extracted_slots = {}
+
+    message_text = build_template_alert_message(record, recommended, render_result)
+    keyboard = build_keyboard(record.internal_id, recommended.template_id if recommended else None)
+    outcome = sender.send_plain_text(message_text, reply_markup=keyboard)
+
+    db.insert_template_suggestion(
+        message_id=record.internal_id,
+        recommended_template_id=recommended.template_id if recommended else None,
+        rule_score=recommended.rule_score if recommended else None,
+        candidates_json=json.dumps([vars(c) for c in candidates], ensure_ascii=False),
+        extraction_json=json.dumps({k: vars(v) for k, v in extracted_slots.items()}, ensure_ascii=False),
+        rendered_text=render_result.rendered_text if render_result and render_result.success else None,
+    )
+    return outcome
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -110,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             if send_targets or retry_records:
                 with TelegramSender(settings) as sender:
                     for record in [*send_targets, *retry_records]:
-                        outcome = sender.send_record(record)
+                        outcome = _send_via_template_pipeline(sender, db, settings, record)
                         db.update_telegram_result(
                             record.internal_id,
                             status=outcome.status,

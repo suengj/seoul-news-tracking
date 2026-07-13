@@ -19,7 +19,7 @@ class FakeSender:
 
     def __init__(self, settings):
         self.settings = settings
-        self.sent_source_ids: list[str] = []
+        self.sent_texts: list[str] = []
 
     def __enter__(self):
         return self
@@ -27,9 +27,20 @@ class FakeSender:
     def __exit__(self, *exc_info):
         return False
 
-    def send_record(self, record):
-        self.sent_source_ids.append(record.source_id)
+    def send_plain_text(self, text, reply_markup=None):
+        self.sent_texts.append(text)
         return TelegramSendOutcome(status=TelegramStatus.TELEGRAM_SENT, message_ids=["999"])
+
+    @property
+    def sent_source_ids(self) -> list[str]:
+        # `build_template_alert_message` places `record.original_body` (here
+        # always "본문 {source_id}") verbatim on its own line.
+        ids = []
+        for text in self.sent_texts:
+            for line in text.splitlines():
+                if line.startswith("본문 "):
+                    ids.append(line.removeprefix("본문 "))
+        return ids
 
 
 @pytest.fixture

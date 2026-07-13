@@ -1,0 +1,52 @@
+{
+  "total_records": 5005,
+  "templates": [
+    {
+      "template_id": "FLOOD_ADVISORY_ISSUED",
+      "candidate_count": 2,
+      "wording_variation_counts": {
+        "발령": 2
+      }
+    },
+    {
+      "template_id": "HEAVY_RAIN_CLEARED",
+      "candidate_count": 5,
+      "wording_variation_counts": {
+        "발효": 2,
+        "해제": 5,
+        "부로": 2
+      }
+    },
+    {
+      "template_id": "HEAVY_RAIN_DOWNGRADED",
+      "candidate_count": 0,
+      "wording_variation_counts": {}
+    },
+    {
+      "template_id": "HEAVY_RAIN_MULTI_LEVEL_ISSUED",
+      "candidate_count": 0,
+      "wording_variation_counts": {}
+    },
+    {
+      "template_id": "HEATWAVE_UPGRADED",
+      "candidate_count": 0,
+      "wording_variation_counts": {}
+    },
+    {
+      "template_id": "HEATWAVE_ADVISORY_ISSUED",
+      "candidate_count": 101,
+      "wording_variation_counts": {
+        "발효": 97,
+        "발령": 4,
+        "기준": 1
+      }
+    },
+    {
+      "template_id": "TROPICAL_NIGHT_ADVISORY_ISSUED",
+      "candidate_count": 21,
+      "wording_variation_counts": {
+        "발효": 18
+      }
+    }
+  ]
+}

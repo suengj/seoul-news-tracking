@@ -23,6 +23,8 @@ HISTORY_DETAIL_URL = "https://www.safetydata.go.kr/disaster-data/disasterNotific
 HISTORY_REQUEST_DELAY_MIN = 0.5
 HISTORY_REQUEST_DELAY_MAX = 10.0
 
+TEMPLATES_PATH = PROJECT_ROOT / "config" / "message_templates.yaml"
+
 
 def _parse_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
@@ -51,6 +53,7 @@ class Settings:
     history_request_timeout_seconds: float = 20.0
     history_max_retries: int = 3
     history_target_count: int = 10000
+    template_recommend_threshold: float = 0.85
 
     @property
     def telegram_configured(self) -> bool:
@@ -107,4 +110,5 @@ def load_settings(env_file: Path | None = None) -> Settings:
         ),
         history_max_retries=int(os.environ.get("HISTORY_MAX_RETRIES", "3")),
         history_target_count=int(os.environ.get("HISTORY_TARGET_COUNT", "10000")),
+        template_recommend_threshold=float(os.environ.get("TEMPLATE_RECOMMEND_THRESHOLD", "0.85")),
     )

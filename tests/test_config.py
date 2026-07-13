@@ -54,3 +54,38 @@ def test_telegram_configured_requires_both_token_and_chat_id(tmp_path, monkeypat
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     settings = load_settings(env_file=tmp_path / "missing.env")
     assert not settings.telegram_configured
+
+
+def test_history_settings_defaults(tmp_path, monkeypatch):
+    for key in (
+        "HISTORY_DATABASE_PATH",
+        "HISTORY_REQUEST_DELAY_SECONDS",
+        "HISTORY_REQUEST_TIMEOUT_SECONDS",
+        "HISTORY_MAX_RETRIES",
+        "HISTORY_TARGET_COUNT",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    settings = load_settings(env_file=tmp_path / "missing.env")
+    assert settings.history_database_path.name == "history_raw.db"
+    assert settings.history_request_delay_seconds == 1.5
+    assert settings.history_request_timeout_seconds == 20
+    assert settings.history_max_retries == 3
+    assert settings.history_target_count == 10000
+
+
+def test_history_request_delay_out_of_range_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("HISTORY_REQUEST_DELAY_SECONDS", "0.1")
+    with pytest.raises(ValueError):
+        load_settings(env_file=tmp_path / "missing.env")
+
+    monkeypatch.setenv("HISTORY_REQUEST_DELAY_SECONDS", "20")
+    with pytest.raises(ValueError):
+        load_settings(env_file=tmp_path / "missing.env")
+
+
+def test_history_database_path_relative_resolved_under_project_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("HISTORY_DATABASE_PATH", "data/custom_history.db")
+    settings = load_settings(env_file=tmp_path / "missing.env")
+    assert settings.history_database_path.is_absolute()
+    assert settings.history_database_path.name == "custom_history.db"

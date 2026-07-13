@@ -45,6 +45,25 @@ python -m app.commands.poll_once --send --notify-existing
 python -m app.commands.send_telegram_test --confirm
 ```
 
+### Historical backfill (separate dataset)
+
+A one-time, resumable backfill of 10,000 unique raw historical records from
+the public archive at `safetydata.go.kr`, stored in its own SQLite database
+(`data/history_raw.db`, separate from the real-time store above). No
+filtering, classification, or rewriting — raw data only, for later
+reprocessing. See `docs/history_source_discovery.md`,
+`docs/history_backfill.md`, `docs/history_database.md`, and
+`docs/history_collection_report.md`.
+
+```bash
+python -m app.commands.inspect_history_source
+python -m app.commands.backfill_history --target-count 10000 --delay-seconds 1.5
+python -m app.commands.backfill_history --resume
+python -m app.commands.backfill_history --status
+python -m app.commands.validate_history_db
+python -m app.commands.export_history_sample --count 100 --output data/exports/history_sample.jsonl
+```
+
 ## Tests
 
 ```bash
@@ -68,6 +87,7 @@ sanitized `raw_payload`. See `app/models.py` and `app/database.py`.
 app/            application code (config, models, collector, parser, database, telegram_sender)
 app/commands/   CLI entry points
 app/future/     inactive placeholders for Part 2+ (never imported by Part 1 runtime)
+app/history_*.py  historical backfill collector (separate dataset, see docs/history_*.md)
 docs/           source discovery, architecture, Telegram setup, completion report
 artifacts/      small sanitized evidence from source discovery (no secrets)
 tests/          fixture-based tests, no live network dependency

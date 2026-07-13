@@ -17,6 +17,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_PAGE_URL = "https://safecity.seoul.go.kr/news/dist/dust/newsDistDustList.page"
 SOURCE_API_URL = "https://safecity.seoul.go.kr/disstr/selectDisstrSms.do"
 
+HISTORY_LIST_URL = "https://www.safetydata.go.kr/disaster-data/disasterNotification"
+HISTORY_DETAIL_URL = "https://www.safetydata.go.kr/disaster-data/disasterNotificationDetail"
+
+HISTORY_REQUEST_DELAY_MIN = 0.5
+HISTORY_REQUEST_DELAY_MAX = 10.0
+
 
 def _parse_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
@@ -40,6 +46,11 @@ class Settings:
     telegram_send_enabled: bool
     database_path: Path
     log_level: str
+    history_database_path: Path = Path("data/history_raw.db")
+    history_request_delay_seconds: float = 1.5
+    history_request_timeout_seconds: float = 20.0
+    history_max_retries: int = 3
+    history_target_count: int = 10000
 
     @property
     def telegram_configured(self) -> bool:
@@ -61,12 +72,26 @@ def load_settings(env_file: Path | None = None) -> Settings:
     if not database_path.is_absolute():
         database_path = PROJECT_ROOT / database_path
 
+    history_database_path_raw = os.environ.get("HISTORY_DATABASE_PATH", "data/history_raw.db")
+    history_database_path = Path(history_database_path_raw)
+    if not history_database_path.is_absolute():
+        history_database_path = PROJECT_ROOT / history_database_path
+
     try:
         allowed_ids = _parse_user_ids(os.environ.get("TELEGRAM_ALLOWED_USER_IDS", ""))
     except ValueError as exc:
         raise ValueError(
             "TELEGRAM_ALLOWED_USER_IDS must be a comma-separated list of integers"
         ) from exc
+
+    history_request_delay_seconds = float(
+        os.environ.get("HISTORY_REQUEST_DELAY_SECONDS", "1.5")
+    )
+    if not (HISTORY_REQUEST_DELAY_MIN <= history_request_delay_seconds <= HISTORY_REQUEST_DELAY_MAX):
+        raise ValueError(
+            "HISTORY_REQUEST_DELAY_SECONDS must be between "
+            f"{HISTORY_REQUEST_DELAY_MIN} and {HISTORY_REQUEST_DELAY_MAX}"
+        )
 
     return Settings(
         telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
@@ -75,4 +100,11 @@ def load_settings(env_file: Path | None = None) -> Settings:
         telegram_send_enabled=_parse_bool(os.environ.get("TELEGRAM_SEND_ENABLED", "false")),
         database_path=database_path,
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        history_database_path=history_database_path,
+        history_request_delay_seconds=history_request_delay_seconds,
+        history_request_timeout_seconds=float(
+            os.environ.get("HISTORY_REQUEST_TIMEOUT_SECONDS", "20")
+        ),
+        history_max_retries=int(os.environ.get("HISTORY_MAX_RETRIES", "3")),
+        history_target_count=int(os.environ.get("HISTORY_TARGET_COUNT", "10000")),
     )

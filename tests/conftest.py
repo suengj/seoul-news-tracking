@@ -7,10 +7,62 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from app.config import Settings
 from app.models import DisasterMessageRecord
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 SEOUL_TZ = ZoneInfo("Asia/Seoul")
+
+
+@pytest.fixture(autouse=True)
+def _never_load_the_real_dotenv(tmp_path, monkeypatch):
+    """Safety net: redirect config.load_settings()'s default `.env` lookup to
+    an empty tmp directory for every test.
+
+    Without this, any test path that reaches `load_settings()` without an
+    explicit `env_file=` (e.g. a command's `main()` calling it internally)
+    would fall back to the developer's real project `.env` — which may hold
+    a live Telegram bot token, a real chat id, TELEGRAM_SEND_ENABLED=true,
+    and a real OPENAI_API_KEY. This fixture makes that structurally
+    impossible: PROJECT_ROOT/.env can never resolve to the real file during
+    a test run.
+    """
+    import app.config as config_module
+
+    monkeypatch.setattr(config_module, "PROJECT_ROOT", tmp_path)
+
+
+def build_settings(**overrides) -> Settings:
+    """Construct a fully-populated Settings for tests without touching the environment."""
+    defaults = dict(
+        telegram_bot_token="TEST_TOKEN",
+        telegram_chat_id="TEST_CHAT",
+        telegram_allowed_user_ids=(111,),
+        telegram_send_enabled=True,
+        database_path=None,
+        log_level="INFO",
+        poll_interval_seconds=300,
+        status_stale_after_minutes=15,
+        message_retention_days=90,
+        run_history_retention_days=14,
+        store_successful_noop_runs=False,
+        cleanup_interval_hours=24,
+        tombstone_retention_days=365,
+        local_shutdown_command_enabled=False,
+        template_recommend_threshold=0.85,
+        ai_enabled=False,
+        openai_api_key="",
+        openai_model="gpt-5-mini",
+        openai_timeout_seconds=30.0,
+        openai_max_retries=2,
+    )
+    defaults.update(overrides)
+    return Settings(**defaults)
+
+
+@pytest.fixture
+def make_settings():
+    return build_settings
 
 
 @pytest.fixture

@@ -1,0 +1,183 @@
+version: 1
+
+templates:
+  - id: FLOOD_ADVISORY_ISSUED
+    display_name: "홍수주의보 발효 안내"
+    button_label: "🌊 홍수주의보"
+    enabled: true
+    required_slots:
+      - 기준시각
+      - 하천명
+    optional_slots: []
+    text: |
+      📢 홍수주의보 발효 안내
+      ({기준시각} 기준)
+
+      ☔ 홍수주의보
+      {하천명}
+
+      하천 수위가 상승하고 있습니다.
+
+      하천변과 산책로,
+      저지대 출입을 자제하시고
+      안전한 곳으로 이동해 주세요.
+
+      📌 실시간 재난예보·행동요령
+      서울안전누리
+      👉 safecity.seoul.go.kr
+
+  - id: HEAVY_RAIN_CLEARED
+    display_name: "호우특보 해제"
+    button_label: "☔ 호우 해제"
+    enabled: true
+    required_slots:
+      - 지역
+      - 해제시각
+    optional_slots: []
+    text: |
+      📢 [안내]
+
+      {지역}에 발효되었던
+      호우특보는 {해제시각}부로 해제되었습니다.
+
+  - id: HEAVY_RAIN_DOWNGRADED
+    display_name: "호우경보 하향"
+    button_label: "☔ 호우 하향"
+    enabled: true
+    required_slots:
+      - 기준일시
+      - 지역
+    optional_slots: []
+    text: |
+      📢 {기준일시} 기준
+
+      {지역} 호우경보가
+      호우주의보로 하향되었습니다.
+
+      하천 수위 상승과 침수 위험은 남아있으니,
+
+      하천변·지하차도·지하공간 출입은 자제해 주세요.
+
+      📌 실시간 재난예보·행동요령
+      서울안전누리
+      👉 safecity.seoul.go.kr
+
+  - id: HEAVY_RAIN_MULTI_LEVEL_ISSUED
+    display_name: "호우특보 발효 안내"
+    button_label: "☔ 호우 복합"
+    enabled: true
+    required_slots:
+      - 지역
+      - 기준시각
+    optional_slots:
+      - 경보지역
+      - 주의보지역
+      - 홍수지역
+    text: |
+      📢 {지역} 호우특보 발효 안내
+      ({기준시각} 기준)
+
+      {#경보지역}☔ 호우경보
+      {경보지역}
+
+      {/경보지역}{#주의보지역}☔ 호우주의보
+      {주의보지역}
+
+      {/주의보지역}{#홍수지역}☔ 홍수주의보
+      {홍수지역}
+
+      {/홍수지역}하천 수위 상승과 저지대·지하공간 침수가 우려됩니다.
+
+      하천변·산책로·둔치·공사장 등
+      위험지역 출입을 자제하고,
+      대피 권고 시 즉시 안전한 곳으로 이동해 주세요.
+
+      📌 실시간 재난예보·행동요령
+      서울안전누리
+      👉 safecity.seoul.go.kr
+
+  - id: HEATWAVE_UPGRADED
+    display_name: "폭염경보 상향"
+    button_label: "🔥 폭염 상향"
+    enabled: true
+    required_slots:
+      - 발표일시
+      - 지역
+    optional_slots:
+      - 유지지역
+    text: |
+      🚨 {발표일시}부로,
+      {지역}이(가)
+      폭염주의보에서 폭염경보로 상향되었습니다.
+
+      {#유지지역}{유지지역}은(는) 폭염주의보가 유지됩니다.
+
+      {/유지지역}한낮 야외활동을 자제하고,
+      충분한 수분 섭취와 적정 실내 냉방온도 유지 등
+      건강관리에 각별히 유의해 주세요.
+
+      📲 실시간 속보·무더위쉼터 정보
+      👉 safecity.seoul.go.kr
+
+  - id: HEATWAVE_ADVISORY_ISSUED
+    display_name: "폭염주의보 발효"
+    button_label: "🔥 폭염주의보"
+    enabled: true
+    required_slots:
+      - 기준일시
+      - 지역
+    optional_slots: []
+    text: |
+      🚨 {기준일시} 기준,
+      {지역} 폭염주의보 발효
+
+      서울시는 폭염 피해 예방을 위해
+      폭염 종합지원상황실을 가동하고
+      시민 보호와 취약시설 안전관리를 강화합니다.
+
+      💥 한낮 야외활동은 자제하고
+      충분한 수분 섭취와 휴식으로
+      건강관리에 유의해 주세요.
+
+      📲 실시간 속보·무더위쉼터 정보
+      👉 safecity.seoul.go.kr
+
+  - id: TROPICAL_NIGHT_ADVISORY_ISSUED
+    display_name: "열대야주의보 발효"
+    button_label: "🌙 열대야"
+    enabled: true
+    required_slots:
+      - 발표일시
+      - 지역
+    optional_slots: []
+    text: |
+      🚨 {발표일시}부로 {지역} 열대야주의보 발효
+
+      오늘 밤에도 무더위가 이어질 전망입니다.
+
+      ✅ 에어컨·선풍기를 활용해 실내를 시원하게 유지하세요.
+      ✅ 잠들기 전 충분한 수분을 섭취하고, 카페인과 알코올은 피하세요.
+      ✅ 혼자 사는 어르신과 만성질환자의 안부를 확인해 주세요.
+
+      ※ 열대야주의보는 폭염주의보 발효 지역 중에서 서울의 경우에는 밤 최저기온(18시~익일 09시)이 26℃ 이상인 경우에 발효됩니다.
+
+      📲 실시간 속보·폭염 행동요령
+      👉 safecity.seoul.go.kr
+
+  - id: ORIGINAL_ONLY
+    display_name: "원문 그대로"
+    button_label: "📄 원문"
+    enabled: true
+    required_slots:
+      - 원문
+    optional_slots: []
+    text: |
+      {원문}
+
+  - id: UNKNOWN
+    display_name: "권장 템플릿 없음"
+    button_label: ""
+    enabled: false
+    required_slots: []
+    optional_slots: []
+    text: ""

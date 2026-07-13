@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.config import load_settings
+from app.config import ConfigError, load_settings
 
 
 def test_missing_env_vars_produce_safe_defaults(tmp_path, monkeypatch):
@@ -89,3 +89,60 @@ def test_history_database_path_relative_resolved_under_project_root(tmp_path, mo
     settings = load_settings(env_file=tmp_path / "missing.env")
     assert settings.history_database_path.is_absolute()
     assert settings.history_database_path.name == "custom_history.db"
+
+
+# --- Service v1: polling / retention / AI settings ---------------------------
+
+
+def test_service_v1_defaults(tmp_path, monkeypatch):
+    for key in (
+        "POLL_INTERVAL_SECONDS",
+        "STATUS_STALE_AFTER_MINUTES",
+        "MESSAGE_RETENTION_DAYS",
+        "RUN_HISTORY_RETENTION_DAYS",
+        "CLEANUP_INTERVAL_HOURS",
+        "TOMBSTONE_RETENTION_DAYS",
+        "AI_ENABLED",
+        "OPENAI_MODEL",
+        "OPENAI_TIMEOUT_SECONDS",
+        "OPENAI_MAX_RETRIES",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    settings = load_settings(env_file=tmp_path / "missing.env")
+    assert settings.poll_interval_seconds == 300
+    assert settings.status_stale_after_minutes == 15
+    assert settings.message_retention_days == 90
+    assert settings.run_history_retention_days == 14
+    assert settings.cleanup_interval_hours == 24
+    assert settings.tombstone_retention_days == 365
+    assert settings.ai_enabled is False
+    assert settings.openai_api_key == ""
+    assert settings.openai_model == "gpt-5-mini"
+    assert settings.openai_timeout_seconds == 30
+    assert settings.openai_max_retries == 2
+    assert settings.ai_configured is False
+
+
+def test_poll_interval_out_of_range_raises_config_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("POLL_INTERVAL_SECONDS", "1")
+    with pytest.raises(ConfigError):
+        load_settings(env_file=tmp_path / "missing.env")
+
+
+def test_status_stale_after_minutes_out_of_range_raises_config_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATUS_STALE_AFTER_MINUTES", "0")
+    with pytest.raises(ConfigError):
+        load_settings(env_file=tmp_path / "missing.env")
+
+
+def test_ai_enabled_requires_key_to_be_considered_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_ENABLED", "true")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    settings = load_settings(env_file=tmp_path / "missing.env")
+    assert settings.ai_enabled is True
+    assert settings.ai_configured is False  # no key supplied yet
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real")
+    settings = load_settings(env_file=tmp_path / "missing.env")
+    assert settings.ai_configured is True

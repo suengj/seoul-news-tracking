@@ -13,8 +13,7 @@ from app.models import DisasterMessageRecord
 
 
 class XPublisher(Protocol):
-    def publish(self, record: DisasterMessageRecord, formatted_text: str) -> str:
-        ...
+    def publish(self, record: DisasterMessageRecord, formatted_text: str) -> str: ...
 
 
 def publish_to_x(record: DisasterMessageRecord, formatted_text: str) -> str:

@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-14
+
+### Added
+- `/history` command with dynamic recent-message buttons (up to 10, KST
+  `MM/DD HH:MM · {region}` labels, `hist:{internal_id}` callbacks).
+- Offline Telegram routing validation command:
+  `python -m app.commands.validate_telegram_behavior`.
+- Interaction latency and delivery-mode logging (`delivery_mode`,
+  `chat_type`, `elapsed_ms`, `TELEGRAM_SLOW_INTERACTION_MS` warning threshold).
+
+### Fixed
+- `answer_callback_query` is no longer gated by `TELEGRAM_SEND_ENABLED`
+  (interactive acknowledgement still requires a bot token; 3s timeout).
+- Interactive sends without an explicit `chat_id` now fail closed instead of
+  silently falling back to `TELEGRAM_CHAT_ID`.
+- Legacy pre-v0.2.0 short-code callback payloads (`rain_clr`, `flood_adv`, …)
+  remain readable so buttons already in Telegram chats keep working.
+
+### Documented
+- Private-chat isolation versus shared-group visibility.
+- Broadcast versus interactive response behavior.
+- Latency interpretation and AI blocking notes.
+
 ## [0.2.0] - 2026-07-14
 
 ### Added

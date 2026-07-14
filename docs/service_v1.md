@@ -45,7 +45,7 @@ one to the other:
 
 | | Automatic broadcast | Interactive reply |
 |---|---|---|
-| When | Poller detects a genuinely new SafeCity message (`app.commands.poll_once`) | `/latest`, ordinary text, `/status`, `/pause`, `/resume`, `/help`, any callback (template selection, preview confirm/cancel/AI) |
+| When | Poller detects a genuinely new SafeCity message (`app.commands.poll_once`) | `/latest`, `/history`, ordinary text, `/status`, `/pause`, `/resume`, `/help`, any callback (history, category, template, preview confirm/cancel/AI) |
 | Target chat | `TELEGRAM_CHAT_ID` (the configured broadcast chat), always | The chat_id the inbound message/callback actually came from — `message.chat.id` or `callback_query.message.chat.id` |
 | `TELEGRAM_SEND_ENABLED` | Honored — the flag gates this | Never honored — a direct reply to something an operator just did must never be silently dropped |
 | Persists `template_suggestions`? | Yes, once | No (a `/latest` replay never adds a second row) |
@@ -53,10 +53,13 @@ one to the other:
 `app.template_flow.send_initial_alert(..., target_chat_id, persist_suggestion,
 enforce_send_enabled)` is the single function both paths call — the
 rendered text/keyboard are always byte-for-byte identical, only the target
-chat and persistence differ. `send_latest_alert` (used by `/latest`/text)
-always passes the inbound chat_id and `persist_suggestion=False`.
+chat and persistence differ. `send_latest_alert` / `/history` always pass
+the inbound chat_id and `persist_suggestion=False`.
 `app.commands.poll_once` always passes `settings.telegram_chat_id` and
 `persist_suggestion=True`.
+
+See also `docs/telegram_routing_validation.md` (Case A private chats vs Case B
+shared groups vs Case C Broadcast) and `docs/history_command.md`.
 
 Every callback handler in `app.template_flow.dispatch_callback` extracts
 `interaction_chat_id` from `callback_query.message.chat.id` — the chat the

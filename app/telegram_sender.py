@@ -15,6 +15,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -33,6 +34,9 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_MESSAGE_LIMIT = 4096
 MAX_SEND_RETRIES = 2
 RETRY_BACKOFF_SECONDS = 2.0
+CALLBACK_ACK_TIMEOUT_SECONDS = 3.0
+HISTORY_REGION_LABEL_MAX = 24
+_SEOUL_TZ = ZoneInfo("Asia/Seoul")
 
 # Characters MarkdownV2 requires escaping outside of intentional entities.
 # https://core.telegram.org/bots/api#markdownv2-style
@@ -219,30 +223,44 @@ class TelegramSender:
                 status=TelegramStatus.TELEGRAM_PENDING,
                 error="send disabled (TELEGRAM_SEND_ENABLED=false)",
             )
-        if not self.settings.telegram_configured:
+        if not enforce_send_enabled and chat_id is None:
+            raise TelegramPermanentError("interactive send requires explicit chat_id")
+        if not self.settings.telegram_bot_token:
+            raise TelegramPermanentError("TELEGRAM_BOT_TOKEN not configured")
+        if enforce_send_enabled and not self.settings.telegram_configured:
             raise TelegramPermanentError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not configured")
 
         target_chat_id = chat_id if chat_id is not None else self.settings.telegram_chat_id
+        send_started = time.monotonic()
         chunks = split_message(text)
         message_ids: list[str] = []
+        attempts_total = 0
         try:
             for i, chunk in enumerate(chunks):
                 is_last = i == len(chunks) - 1
-                message_ids.append(
-                    self._send_chunk(
-                        chunk,
-                        chat_id=target_chat_id,
-                        parse_mode=parse_mode,
-                        # Only the first chunk threads as a reply; only the
-                        # last chunk carries the inline keyboard.
-                        reply_to_message_id=reply_to_message_id if i == 0 else None,
-                        reply_markup=reply_markup if is_last else None,
-                    )
+                message_id, attempts = self._send_chunk(
+                    chunk,
+                    chat_id=target_chat_id,
+                    parse_mode=parse_mode,
+                    # Only the first chunk threads as a reply; only the
+                    # last chunk carries the inline keyboard.
+                    reply_to_message_id=reply_to_message_id if i == 0 else None,
+                    reply_markup=reply_markup if is_last else None,
                 )
+                message_ids.append(message_id)
+                attempts_total += attempts
         except TelegramError as exc:
             return TelegramSendOutcome(
                 status=TelegramStatus.TELEGRAM_FAILED, message_ids=message_ids, error=str(exc)
             )
+        send_ms = max(0, int((time.monotonic() - send_started) * 1000))
+        logger.info(
+            "Telegram sendMessage chat_id=%s chunks=%s attempts=%s elapsed_ms=%s",
+            target_chat_id,
+            len(chunks),
+            attempts_total,
+            send_ms,
+        )
         return TelegramSendOutcome(status=TelegramStatus.TELEGRAM_SENT, message_ids=message_ids)
 
     def _send_chunk(
@@ -253,7 +271,7 @@ class TelegramSender:
         parse_mode: str | None,
         reply_to_message_id: int | None = None,
         reply_markup: dict | None = None,
-    ) -> str:
+    ) -> tuple[str, int]:
         url = f"{TELEGRAM_API_BASE}/bot{self.settings.telegram_bot_token}/sendMessage"
         payload: dict = {"chat_id": chat_id, "text": text}
         if parse_mode:
@@ -276,7 +294,7 @@ class TelegramSender:
 
             if response.status_code == 200:
                 data = response.json()
-                return str(data["result"]["message_id"])
+                return str(data["result"]["message_id"]), attempt + 1
 
             if response.status_code == 429 or response.status_code >= 500:
                 last_error = f"HTTP {response.status_code}: {response.text[:200]}"
@@ -298,7 +316,15 @@ class TelegramSender:
     def answer_callback_query(
         self, callback_query_id: str, *, text: str = "", show_alert: bool = False
     ) -> None:
-        if not self.settings.telegram_send_enabled or not self.settings.telegram_configured:
+        """Acknowledge an inline-button press promptly.
+
+        Interactive acknowledgement — never gated by TELEGRAM_SEND_ENABLED.
+        Requires a bot token only. Failures are logged; callers continue.
+        """
+        if not callback_query_id:
+            return
+        if not self.settings.telegram_bot_token:
+            logger.warning("answerCallbackQuery skipped: TELEGRAM_BOT_TOKEN not set")
             return
         url = f"{TELEGRAM_API_BASE}/bot{self.settings.telegram_bot_token}/answerCallbackQuery"
         try:
@@ -309,8 +335,9 @@ class TelegramSender:
                     "text": text,
                     "show_alert": show_alert,
                 },
+                timeout=CALLBACK_ACK_TIMEOUT_SECONDS,
             )
-        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as exc:
             logger.warning("answerCallbackQuery failed: %s", exc)
 
     def get_updates(self, *, offset: int | None, timeout: int) -> list[dict]:
@@ -355,6 +382,20 @@ CATEGORY_META: dict[str, dict[str, str]] = {
 }
 CATEGORY_ORDER = ("HW", "HT", "TN", "FL")
 
+# Service v1 short codes embedded in already-sent Telegram messages.
+# New menus emit canonical Excel IDs; these remain readable so old inline
+# buttons keep working after the v0.2.0 catalog migration.
+_LEGACY_SHORT_CODE_TO_TEMPLATE_ID: dict[str, str] = {
+    "flood_adv": "FL-01",
+    "rain_clr": "HW-05",
+    "rain_down": "HW-04",
+    "rain_multi": "HEAVY_RAIN_MULTI_LEVEL_ISSUED",
+    "heat_up": "HT-03",
+    "heat_adv": "HT-01",
+    "trop_night": "TN-01",
+    "orig": "ORIGINAL_ONLY",
+}
+
 _EXTRACTION_METHOD_LABELS = {"rule": "Rule", "ai": "AI"}
 
 
@@ -364,7 +405,11 @@ def make_callback_data(message_id: int, template_id: str) -> str:
 
 
 def parse_callback_data(data: str) -> tuple[int, str] | None:
-    """Returns `(message_id, template_id)`, or `None` if malformed/unrecognized."""
+    """Returns `(message_id, template_id)`, or `None` if malformed/unrecognized.
+
+    Accepts canonical Excel IDs (`HW-05`), legacy aliases
+    (`HEAVY_RAIN_CLEARED`), and pre-v0.2.0 short codes (`rain_clr`).
+    """
     parts = data.split(":")
     if len(parts) != 3 or parts[0] != "tpl":
         return None
@@ -372,7 +417,8 @@ def parse_callback_data(data: str) -> tuple[int, str] | None:
         message_id = int(parts[1])
     except ValueError:
         return None
-    template_id = parts[2]
+    raw = parts[2]
+    template_id = _LEGACY_SHORT_CODE_TO_TEMPLATE_ID.get(raw, raw)
     if get_template(template_id) is None:
         return None
     return message_id, resolve_template_id(template_id)
@@ -407,6 +453,63 @@ def parse_back_callback_data(data: str) -> int | None:
         return int(parts[1])
     except ValueError:
         return None
+
+
+def make_history_callback_data(internal_id: int) -> str:
+    return f"hist:{internal_id}"
+
+
+def parse_history_callback_data(data: str) -> int | None:
+    parts = data.split(":")
+    if len(parts) != 2 or parts[0] != "hist":
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
+
+
+def format_history_button_label(record: DisasterMessageRecord) -> str:
+    """`MM/DD HH:MM · {region}` in KST — never includes the disaster body."""
+    sent = record.sent_at
+    if sent.tzinfo is None:
+        sent = sent.replace(tzinfo=_SEOUL_TZ)
+    else:
+        sent = sent.astimezone(_SEOUL_TZ)
+    stamp = sent.strftime("%m/%d %H:%M")
+    region = " ".join((record.sender_or_region or "").split())
+    if len(region) > HISTORY_REGION_LABEL_MAX:
+        region = region[: HISTORY_REGION_LABEL_MAX - 1] + "…"
+    return f"{stamp} · {region}" if region else stamp
+
+
+def build_history_list_message(count: int) -> str:
+    return f"[최근 재난문자 {count}건]\n\n원하는 발송시각을 선택해 주세요."
+
+
+def build_history_keyboard(records: list[DisasterMessageRecord]) -> dict:
+    """One record per row; callback_data is only `hist:{internal_id}`."""
+    rows: list[list[dict]] = []
+    for record in records:
+        if record.internal_id is None:
+            continue
+        rows.append(
+            [
+                {
+                    "text": format_history_button_label(record),
+                    "callback_data": make_history_callback_data(record.internal_id),
+                }
+            ]
+        )
+    return {"inline_keyboard": rows}
+
+
+def build_history_missing_message() -> str:
+    return (
+        "[기록을 찾을 수 없습니다]\n\n"
+        "보관기간 만료 또는 삭제로 인해 해당 메시지를 조회할 수 없습니다.\n"
+        "다시 /history를 실행해 주세요."
+    )
 
 
 def make_preview_callback_data(preview_id: int, action: str) -> str:
@@ -470,9 +573,7 @@ def build_category_keyboard(message_id: int, category_code: str) -> dict:
         for t in templates
     ]
     rows = _chunk_buttons(buttons, per_row=2)
-    nav: list[dict] = [
-        {"text": "← 뒤로", "callback_data": make_back_callback_data(message_id)}
-    ]
+    nav: list[dict] = [{"text": "← 뒤로", "callback_data": make_back_callback_data(message_id)}]
     original = get_template("ORIGINAL_ONLY")
     if original is not None and original.enabled:
         nav.append(
@@ -583,7 +684,7 @@ def build_preview_complete_message(
         "",
         rendered_text,
     ]
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 
 def build_preview_incomplete_message(
@@ -611,7 +712,7 @@ def build_preview_incomplete_message(
         "원문:",
         original_body,
     ]
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 
 def build_confirmation_message(template_id: str, final_rendered_text: str) -> str:

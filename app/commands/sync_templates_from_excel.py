@@ -65,9 +65,7 @@ class ValidationIssue:
 
     def format(self) -> str:
         tid = self.template_id or "(blank)"
-        return (
-            f"[{self.sheet} row {self.row}] id={tid} field={self.field}: {self.reason}"
-        )
+        return f"[{self.sheet} row {self.row}] id={tid} field={self.field}: {self.reason}"
 
 
 @dataclass
@@ -128,14 +126,10 @@ def _read_catalog(ws) -> tuple[list[CatalogRow], list[ValidationIssue]]:
     seen: set[str] = set()
     for r in range(2, ws.max_row + 1):
         tid = _cell_str(ws.cell(r, headers["템플릿ID"]).value)
-        if not any(
-            _cell_str(ws.cell(r, headers[col]).value) for col in CATALOG_COLUMNS
-        ):
+        if not any(_cell_str(ws.cell(r, headers[col]).value) for col in CATALOG_COLUMNS):
             continue
         if not tid:
-            issues.append(
-                ValidationIssue("", CATALOG_SHEET, r, "템플릿ID", "blank template ID")
-            )
+            issues.append(ValidationIssue("", CATALOG_SHEET, r, "템플릿ID", "blank template ID"))
             continue
         if tid in seen:
             issues.append(
@@ -176,9 +170,7 @@ def _read_wording(ws) -> tuple[list[WordingRow], list[ValidationIssue]]:
         if not any(_cell_str(ws.cell(r, headers[col]).value) for col in WORDING_COLUMNS):
             continue
         if not tid:
-            issues.append(
-                ValidationIssue("", WORDING_SHEET, r, "템플릿ID", "blank template ID")
-            )
+            issues.append(ValidationIssue("", WORDING_SHEET, r, "템플릿ID", "blank template ID"))
             continue
         if tid in seen:
             issues.append(
@@ -334,9 +326,7 @@ def build_from_workbook(workbook_path: Path) -> SyncResult:
         catalog_rows, catalog_issues = _read_catalog(wb[CATALOG_SHEET])
         wording_rows, wording_issues = _read_wording(wb[WORDING_SHEET])
     except ValueError as exc:
-        result.issues.append(
-            ValidationIssue("", "workbook", 1, "columns", str(exc))
-        )
+        result.issues.append(ValidationIssue("", "workbook", 1, "columns", str(exc)))
         return result
 
     result.issues.extend(catalog_issues)
@@ -570,9 +560,7 @@ def validate_loader_accepts(yaml_text: str, tmp_path: Path) -> list[ValidationIs
         clear_template_cache()
     if "HW-01" not in loaded or "ORIGINAL_ONLY" not in loaded:
         issues.append(
-            ValidationIssue(
-                "", "yaml", 0, "loader", "generated YAML missing expected template ids"
-            )
+            ValidationIssue("", "yaml", 0, "loader", "generated YAML missing expected template ids")
         )
     return issues
 

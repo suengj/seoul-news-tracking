@@ -158,7 +158,7 @@ class HistoryDatabase:
         cur = self._conn.execute(
             f"""
             SELECT * FROM historical_crawl_runs
-            WHERE status IN ({','.join('?' for _ in ACTIVE_RUN_STATUSES)})
+            WHERE status IN ({",".join("?" for _ in ACTIVE_RUN_STATUSES)})
             ORDER BY run_id DESC LIMIT 1
             """,
             ACTIVE_RUN_STATUSES,
@@ -166,9 +166,7 @@ class HistoryDatabase:
         return cur.fetchone()
 
     def latest_run(self) -> sqlite3.Row | None:
-        cur = self._conn.execute(
-            "SELECT * FROM historical_crawl_runs ORDER BY run_id DESC LIMIT 1"
-        )
+        cur = self._conn.execute("SELECT * FROM historical_crawl_runs ORDER BY run_id DESC LIMIT 1")
         return cur.fetchone()
 
     def start_run(self, *, target_count: int, current_page: int = 1) -> int:

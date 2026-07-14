@@ -132,9 +132,7 @@ def test_incomplete_selection_hides_final_ok(db, stored_message_id, make_setting
     # The stored message has no river-name token — FLOOD_ADVISORY_ISSUED
     # (requires 하천지점) must re-run extraction against the original body and
     # come back incomplete rather than inventing one.
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "FL-01")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "FL-01"))
 
     assert len(sender.sent_texts) == 1
     text = sender.sent_texts[0]
@@ -256,9 +254,7 @@ def test_template_selection_response_routes_to_interaction_chat_id(
 ):
     settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "HW-05", chat_id=300)
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "HW-05", chat_id=300))
     assert sender.sent_chat_ids == [300]
     assert sender.sent_enforce_send_enabled == [False]
 
@@ -269,9 +265,7 @@ def test_template_selection_response_routes_to_interaction_chat_id(
 def test_confirm_from_different_chat_is_rejected(db, stored_message_id, make_settings):
     settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "HW-05", chat_id=200)
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "HW-05", chat_id=200))
     preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
     ]
@@ -289,9 +283,7 @@ def test_confirm_from_different_chat_is_rejected(db, stored_message_id, make_set
 def test_cancel_from_different_chat_is_rejected(db, stored_message_id, make_settings):
     settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "HW-05", chat_id=200)
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "HW-05", chat_id=200))
     preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
     ]
@@ -307,9 +299,7 @@ def test_ai_from_different_chat_is_rejected(db, stored_message_id, make_settings
         telegram_allowed_user_ids=(ALLOWED_USER_ID,), ai_enabled=True, openai_api_key="sk-test"
     )
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "HW-05", chat_id=200)
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "HW-05", chat_id=200))
     preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
     ]
@@ -328,9 +318,7 @@ def test_confirm_from_different_authorized_user_is_rejected(db, stored_message_i
         db,
         settings,
         sender,
-        _tpl_callback(
-            stored_message_id, "HW-05", chat_id=200, user_id=ALLOWED_USER_ID
-        ),
+        _tpl_callback(stored_message_id, "HW-05", chat_id=200, user_id=ALLOWED_USER_ID),
     )
     preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
@@ -353,12 +341,8 @@ def test_confirm_from_different_authorized_user_is_rejected(db, stored_message_i
 def test_selecting_a_different_template_creates_a_new_preview(db, stored_message_id, make_settings):
     settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "HW-05", cbq_id="c1")
-    )
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "FL-01", cbq_id="c2")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "HW-05", cbq_id="c1"))
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "FL-01", cbq_id="c2"))
     previews = db._conn.execute("SELECT * FROM template_previews ORDER BY preview_id").fetchall()
     assert len(previews) == 2
     assert previews[0]["selected_template_id"] == "HW-05"
@@ -371,16 +355,12 @@ def test_selecting_a_different_template_creates_a_new_preview(db, stored_message
 def test_new_selection_supersedes_prior_active_preview(db, stored_message_id, make_settings):
     settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "HW-05", cbq_id="c1")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "HW-05", cbq_id="c1"))
     first_preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
     ]
 
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "FL-01", cbq_id="c2")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "FL-01", cbq_id="c2"))
 
     first = db.get_preview(first_preview_id)
     assert first.status == "superseded"
@@ -389,15 +369,11 @@ def test_new_selection_supersedes_prior_active_preview(db, stored_message_id, ma
 def test_superseded_preview_cannot_be_confirmed(db, stored_message_id, make_settings):
     settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "HW-05", cbq_id="c1")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "HW-05", cbq_id="c1"))
     first_preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
     ]
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "FL-01", cbq_id="c2")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "FL-01", cbq_id="c2"))
 
     dispatch_callback(db, settings, sender, _preview_callback(first_preview_id, "confirm"))
 
@@ -408,15 +384,11 @@ def test_superseded_preview_cannot_be_confirmed(db, stored_message_id, make_sett
 def test_superseded_preview_cannot_be_cancelled(db, stored_message_id, make_settings):
     settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "HW-05", cbq_id="c1")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "HW-05", cbq_id="c1"))
     first_preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
     ]
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "FL-01", cbq_id="c2")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "FL-01", cbq_id="c2"))
 
     dispatch_callback(db, settings, sender, _preview_callback(first_preview_id, "cancel"))
 
@@ -446,9 +418,7 @@ def test_confirmed_preview_cannot_be_cancelled(db, stored_message_id, make_setti
 def test_latest_preview_remains_usable_after_supersede(db, stored_message_id, make_settings):
     settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "HW-05", cbq_id="c1")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "HW-05", cbq_id="c1"))
     dispatch_callback(
         db, settings, sender, _tpl_callback(stored_message_id, "ORIGINAL_ONLY", cbq_id="c2")
     )
@@ -509,9 +479,7 @@ def test_confirm_is_idempotent_on_repeat_click(db, stored_message_id, make_setti
 def test_confirm_rejected_when_preview_incomplete(db, stored_message_id, make_settings):
     settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "FL-01")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "FL-01"))
     preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
     ]
@@ -652,9 +620,7 @@ def test_ai_button_hidden_reply_when_disabled_but_clicked_anyway(
 ):
     settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,), ai_enabled=False)
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "FL-01")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "FL-01"))
     preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
     ]
@@ -671,9 +637,7 @@ def test_ai_success_creates_ai_preview_with_confirm_and_cancel_only(
         telegram_allowed_user_ids=(ALLOWED_USER_ID,), ai_enabled=True, openai_api_key="sk-test"
     )
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "FL-01")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "FL-01"))
     preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
     ]
@@ -686,7 +650,9 @@ def test_ai_success_creates_ai_preview_with_confirm_and_cancel_only(
                 "기준일시": SlotValue(
                     value="15시", source="ai", evidence="15시 부로", confidence=0.7
                 ),
-                "하천지점": SlotValue(value="예천천", source="ai", evidence="예천천", confidence=0.7),
+                "하천지점": SlotValue(
+                    value="예천천", source="ai", evidence="예천천", confidence=0.7
+                ),
             },
         )
 
@@ -716,9 +682,7 @@ def test_ai_failure_keeps_original_preview_and_allows_cancel(
         telegram_allowed_user_ids=(ALLOWED_USER_ID,), ai_enabled=True, openai_api_key="sk-test"
     )
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "FL-01")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "FL-01"))
     preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
     ]
@@ -760,9 +724,7 @@ def test_successful_ai_preview_supersedes_rule_preview(
         telegram_allowed_user_ids=(ALLOWED_USER_ID,), ai_enabled=True, openai_api_key="sk-test"
     )
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "FL-01")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "FL-01"))
     rule_preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
     ]
@@ -774,7 +736,9 @@ def test_successful_ai_preview_supersedes_rule_preview(
                 "기준일시": SlotValue(
                     value="15시", source="ai", evidence="15시 부로", confidence=0.7
                 ),
-                "하천지점": SlotValue(value="예천천", source="ai", evidence="예천천", confidence=0.7),
+                "하천지점": SlotValue(
+                    value="예천천", source="ai", evidence="예천천", confidence=0.7
+                ),
             },
         )
 
@@ -797,9 +761,7 @@ def test_ai_preview_confirm_records_ai_generation_method(
         telegram_allowed_user_ids=(ALLOWED_USER_ID,), ai_enabled=True, openai_api_key="sk-test"
     )
     sender = FakeSender()
-    dispatch_callback(
-        db, settings, sender, _tpl_callback(stored_message_id, "FL-01")
-    )
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "FL-01"))
     rule_preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
     ]
@@ -809,7 +771,9 @@ def test_ai_preview_confirm_records_ai_generation_method(
             status="succeeded",
             slots={
                 "기준일시": SlotValue(value="15시", source="ai", evidence="15시", confidence=0.7),
-                "하천지점": SlotValue(value="예천천", source="ai", evidence="예천천", confidence=0.7),
+                "하천지점": SlotValue(
+                    value="예천천", source="ai", evidence="예천천", confidence=0.7
+                ),
             },
         )
 

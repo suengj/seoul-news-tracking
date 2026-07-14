@@ -30,9 +30,7 @@ def compute_history_raw_hash(
     if source_id:
         payload = f"source_id:{source_id}"
     else:
-        payload = "\x1f".join(
-            [sender_raw or "", sent_at_raw or "", region_raw or "", body_raw]
-        )
+        payload = "\x1f".join([sender_raw or "", sent_at_raw or "", region_raw or "", body_raw])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

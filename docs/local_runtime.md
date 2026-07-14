@@ -34,10 +34,10 @@ One long-polling process, one `getUpdates` offset sequence, handling
 
 - ordinary messages: authorizes every command against
   `TELEGRAM_ALLOWED_USER_IDS` (by Telegram user ID, never by chat ID
-  alone), and replies to `/latest`, ordinary text (same as `/latest`),
+  alone), and replies to `/latest`, `/history`, ordinary text (same as `/latest`),
   `/status`, `/pause`, `/resume`, `/help`, and an optional dev-only
   `/shutdown`
-- `callback_query` updates: the entire Service v1 template
+- `callback_query` updates: history selection plus the Service v1 template
   selection/preview/confirm/cancel/AI flow, delegated to
   `app.template_flow.dispatch_callback` (see `docs/telegram_template_flow.md`)
 
@@ -95,6 +95,7 @@ below) — it is not the intended operational control.
 | Command | Authorized only? | Effect |
 |---|---|---|
 | `/latest` | yes | Reply with the most recently collected record (full text) |
+| `/history` | yes | Up to 10 recent records as selectable buttons |
 | *(any other text)* | yes | Same as `/latest` |
 | `/status` | yes | Compact system status (see below) |
 | `/pause` | yes | Stop automatic polling + notifications; idempotent |

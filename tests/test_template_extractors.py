@@ -147,9 +147,7 @@ def test_river_dictionary_match_when_no_label_or_nearby_suffix():
     # "도림천" appears, but not immediately near a "홍수주의보" occurrence in
     # this text (there is no 홍수주의보 keyword at all here) -> falls through
     # to the dictionary tier.
-    result = extract_slots(
-        "FL-01", "오늘 12:40 기준 도림천 인근 침수 위험이 있습니다.", "", NOW
-    )
+    result = extract_slots("FL-01", "오늘 12:40 기준 도림천 인근 침수 위험이 있습니다.", "", NOW)
     assert result.extracted_slots["하천지점"].value == "도림천"
     assert result.extracted_slots["하천지점"].source == "dictionary_match"
 
@@ -157,14 +155,10 @@ def test_river_dictionary_match_when_no_label_or_nearby_suffix():
 def test_river_regex_false_positive_health_word_is_excluded():
     # "건강관리" ends in 강 and would match the bare suffix regex, but it must
     # never be returned as a "river" — this was the flagged PR #3 issue.
-    result = extract_slots(
-        "FL-01", "12:00 기준 홍수주의보 발령. 건강관리에 유의하세요.", "", NOW
-    )
+    result = extract_slots("FL-01", "12:00 기준 홍수주의보 발령. 건강관리에 유의하세요.", "", NOW)
     assert "하천지점" not in result.extracted_slots
 
 
 def test_river_regex_still_matches_legitimate_name_near_keyword():
-    result = extract_slots(
-        "FL-01", "12:00 기준 석성천인근 홍수주의보 발령되었습니다.", "", NOW
-    )
+    result = extract_slots("FL-01", "12:00 기준 석성천인근 홍수주의보 발령되었습니다.", "", NOW)
     assert result.extracted_slots["하천지점"].value == "석성천"

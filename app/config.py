@@ -102,6 +102,9 @@ class Settings:
     openai_timeout_seconds: float = 30.0
     openai_max_retries: int = 2
 
+    # Non-AI interactive actions exceeding this emit a WARNING (logs only).
+    telegram_slow_interaction_ms: int = 2000
+
     @property
     def telegram_configured(self) -> bool:
         return bool(self.telegram_bot_token and self.telegram_chat_id)
@@ -140,10 +143,10 @@ def load_settings(env_file: Path | None = None) -> Settings:
             "TELEGRAM_ALLOWED_USER_IDS must be a comma-separated list of integers"
         ) from exc
 
-    history_request_delay_seconds = float(
-        os.environ.get("HISTORY_REQUEST_DELAY_SECONDS", "1.5")
-    )
-    if not (HISTORY_REQUEST_DELAY_MIN <= history_request_delay_seconds <= HISTORY_REQUEST_DELAY_MAX):
+    history_request_delay_seconds = float(os.environ.get("HISTORY_REQUEST_DELAY_SECONDS", "1.5"))
+    if not (
+        HISTORY_REQUEST_DELAY_MIN <= history_request_delay_seconds <= HISTORY_REQUEST_DELAY_MAX
+    ):
         raise ConfigError(
             "HISTORY_REQUEST_DELAY_SECONDS must be between "
             f"{HISTORY_REQUEST_DELAY_MIN} and {HISTORY_REQUEST_DELAY_MAX}"
@@ -205,4 +208,5 @@ def load_settings(env_file: Path | None = None) -> Settings:
         openai_model=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
         openai_timeout_seconds=float(os.environ.get("OPENAI_TIMEOUT_SECONDS", "30")),
         openai_max_retries=int(os.environ.get("OPENAI_MAX_RETRIES", "2")),
+        telegram_slow_interaction_ms=int(os.environ.get("TELEGRAM_SLOW_INTERACTION_MS", "2000")),
     )

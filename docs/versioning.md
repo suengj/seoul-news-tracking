@@ -16,6 +16,12 @@ It's surfaced in the Telegram bot's startup log and in `/status`.
 
 ## Release steps
 
+Same as before. For 0.3.0 specifically: run
+`python -m app.commands.validate_telegram_behavior`, restart on merged main,
+perform the two-user private-chat check in
+`docs/telegram_routing_validation.md`, then tag `v0.3.0` only after live
+validation succeeds.
+
 1. Update/add tests for the change.
 2. Update `CHANGELOG.md` (`[Unreleased]` -> a new dated version section).
 3. Bump the version in `pyproject.toml`.

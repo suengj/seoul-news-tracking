@@ -35,7 +35,9 @@ def assert_no_unescaped_markdown_v2(text: str) -> None:
     rejected with HTTP 400 "Character '-' is reserved" on a real send.
     """
     match = _MARKDOWN_V2_SPECIAL_PATTERN.search(text)
-    assert match is None, f"unescaped MarkdownV2 char {match.group()!r} at {match.start()} in: {text!r}"
+    assert match is None, (
+        f"unescaped MarkdownV2 char {match.group()!r} at {match.start()} in: {text!r}"
+    )
 
 
 def test_escape_markdown_v2_escapes_reserved_characters():
@@ -98,7 +100,9 @@ def test_split_message_does_not_break_escape_sequence():
 
 def test_telegram_disabled_mode_skips_send(make_record, make_settings):
     settings = make_settings(telegram_send_enabled=False)
-    sender = TelegramSender(settings, client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))))
+    sender = TelegramSender(
+        settings, client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    )
     outcome = sender.send_record(make_record())
     assert outcome.status == TelegramStatus.TELEGRAM_PENDING
     assert outcome.message_ids == []
@@ -107,7 +111,9 @@ def test_telegram_disabled_mode_skips_send(make_record, make_settings):
 
 def test_telegram_missing_config_raises(make_record, make_settings):
     settings = make_settings(telegram_bot_token="", telegram_chat_id="")
-    sender = TelegramSender(settings, client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))))
+    sender = TelegramSender(
+        settings, client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    )
     with pytest.raises(TelegramPermanentError):
         sender.send_record(make_record())
     sender.close()
@@ -233,6 +239,13 @@ def test_parse_callback_data_rejects_malformed():
     assert parse_callback_data("tpl:1:unknown_code") is None
 
 
+def test_parse_callback_data_accepts_legacy_short_codes():
+    """Buttons already in Telegram chats still use v0.1.x short codes."""
+    assert parse_callback_data("tpl:42:rain_clr") == (42, "HW-05")
+    assert parse_callback_data("tpl:42:flood_adv") == (42, "FL-01")
+    assert parse_callback_data("tpl:42:orig") == (42, "ORIGINAL_ONLY")
+
+
 def test_make_and_parse_preview_callback_data_roundtrip():
     for action in ("confirm", "cancel", "ai"):
         data = make_preview_callback_data(7, action)
@@ -280,7 +293,9 @@ def test_build_template_alert_message_without_recommendation(make_record):
 def test_build_preview_complete_message_lists_slots_and_rendered_text():
     from app.template_extractors import SlotValue
 
-    slots = {"지역": SlotValue(value="서울", source="sender_or_region", evidence="서울", confidence=1.0)}
+    slots = {
+        "지역": SlotValue(value="서울", source="sender_or_region", evidence="서울", confidence=1.0)
+    }
     text = build_preview_complete_message("HW-05", "rule", slots, "렌더된 문안")
     assert "[템플릿 초안]" in text
     assert "Rule" in text

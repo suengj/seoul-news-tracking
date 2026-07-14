@@ -26,7 +26,9 @@ def history_db(tmp_path):
         "열대야로 높은 기온이 이어지겠습니다. [경산시]",
         "금일 17:00 열대야주의보 발효 ▲건강관리 유의 [연천군]",
     ]
-    conn.executemany("INSERT INTO historical_raw_messages (body_raw) VALUES (?)", [(b,) for b in bodies])
+    conn.executemany(
+        "INSERT INTO historical_raw_messages (body_raw) VALUES (?)", [(b,) for b in bodies]
+    )
     conn.commit()
     conn.close()
     return path

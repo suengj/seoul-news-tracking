@@ -15,11 +15,9 @@ from app.models import DisasterMessageRecord
 
 
 class ApprovalWorkflow(Protocol):
-    def request_approval(self, record: DisasterMessageRecord) -> None:
-        ...
+    def request_approval(self, record: DisasterMessageRecord) -> None: ...
 
-    def handle_response(self, user_id: int, approved: bool) -> None:
-        ...
+    def handle_response(self, user_id: int, approved: bool) -> None: ...
 
 
 def request_approval(record: DisasterMessageRecord, allowed_user_ids: tuple[int, ...]) -> None:

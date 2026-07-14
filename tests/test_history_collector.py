@@ -28,7 +28,12 @@ def test_fetch_list_page_success():
 
     with _client(handler) as client:
         result = fetch_list_page(
-            client, current_page=1, cnt_per_page=100, page_size=10, delay_seconds=0, max_retries=2,
+            client,
+            current_page=1,
+            cnt_per_page=100,
+            page_size=10,
+            delay_seconds=0,
+            max_retries=2,
             sleep_fn=_no_sleep,
         )
     assert result.html == "<html>ok</html>"
@@ -60,8 +65,13 @@ def test_fetch_raises_rate_limited_after_exhausting_retries_on_429():
     with _client(handler) as client:
         with pytest.raises(RateLimitedError) as exc_info:
             fetch_list_page(
-                client, current_page=1, cnt_per_page=100, page_size=10, delay_seconds=0,
-                max_retries=2, sleep_fn=_no_sleep,
+                client,
+                current_page=1,
+                cnt_per_page=100,
+                page_size=10,
+                delay_seconds=0,
+                max_retries=2,
+                sleep_fn=_no_sleep,
             )
     assert exc_info.value.status_code == 429
 
@@ -89,8 +99,13 @@ def test_fetch_recovers_after_transient_429():
 
     with _client(handler) as client:
         result = fetch_list_page(
-            client, current_page=1, cnt_per_page=100, page_size=10, delay_seconds=0,
-            max_retries=2, sleep_fn=_no_sleep,
+            client,
+            current_page=1,
+            cnt_per_page=100,
+            page_size=10,
+            delay_seconds=0,
+            max_retries=2,
+            sleep_fn=_no_sleep,
         )
     assert result.html == "<html>ok</html>"
     assert result.retry_count == 1
@@ -103,8 +118,13 @@ def test_fetch_raises_collector_error_on_other_status():
     with _client(handler) as client:
         with pytest.raises(HistoryCollectorError):
             fetch_list_page(
-                client, current_page=1, cnt_per_page=100, page_size=10, delay_seconds=0,
-                max_retries=1, sleep_fn=_no_sleep,
+                client,
+                current_page=1,
+                cnt_per_page=100,
+                page_size=10,
+                delay_seconds=0,
+                max_retries=1,
+                sleep_fn=_no_sleep,
             )
 
 
@@ -117,7 +137,12 @@ def test_sleep_fn_invoked_on_retry_backoff():
     with _client(handler) as client:
         with pytest.raises(RateLimitedError):
             fetch_list_page(
-                client, current_page=1, cnt_per_page=100, page_size=10, delay_seconds=0,
-                max_retries=2, sleep_fn=sleeps.append,
+                client,
+                current_page=1,
+                cnt_per_page=100,
+                page_size=10,
+                delay_seconds=0,
+                max_retries=2,
+                sleep_fn=sleeps.append,
             )
     assert len(sleeps) == 2  # one cooldown sleep between each of the 3 attempts

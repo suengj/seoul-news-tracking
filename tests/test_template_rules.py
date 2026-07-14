@@ -82,8 +82,12 @@ def test_tropical_night_requires_explicit_advisory_phrase():
     explicit = "금일 17:00 열대야주의보 발효 중입니다."
     generic = "열대야로 높은 기온이 이어지겠습니다. 건강관리에 유의하세요."
 
-    explicit_scores = {s.template_id: s.rule_score for s in suggest_templates(explicit, "연천군", NOW)}
-    generic_scores = {s.template_id: s.rule_score for s in suggest_templates(generic, "경산시", NOW)}
+    explicit_scores = {
+        s.template_id: s.rule_score for s in suggest_templates(explicit, "연천군", NOW)
+    }
+    generic_scores = {
+        s.template_id: s.rule_score for s in suggest_templates(generic, "경산시", NOW)
+    }
 
     assert explicit_scores["TN-01"] == 1.0
     # Generic 무더위/열대야 wording without the explicit "주의보" phrase must not match.

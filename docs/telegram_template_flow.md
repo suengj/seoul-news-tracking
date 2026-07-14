@@ -5,6 +5,9 @@ wired over Telegram. See `docs/service_v1.md` for the product-level
 picture and `docs/template_engine.md` for the rule/extraction/rendering
 logic itself.
 
+See `docs/history_command.md` for `/history` and
+`docs/telegram_routing_validation.md` for Broadcast vs interactive diagnosis.
+
 ## Excel catalog (v0.2.0)
 
 Business templates come from `templates/서울시_재난특보_X템플릿.xlsx`
@@ -22,7 +25,7 @@ Initial keyboard is two-stage:
 `python -m app.commands.run_telegram_bot` runs a single `getUpdates`
 long-poll (`app/telegram_bot.py::TelegramBotRunner`) that handles **both**:
 
-- ordinary messages: `/latest`, `/status`, `/pause`, `/resume`, `/help`,
+- ordinary messages: `/latest`, `/history`, `/status`, `/pause`, `/resume`, `/help`,
   plain text (same as `/latest`)
 - `callback_query` updates: routed to `app.template_flow.dispatch_callback`
 

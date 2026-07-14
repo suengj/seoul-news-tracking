@@ -185,9 +185,7 @@ def _extract_river_name(text: str) -> SlotValue | None:
 
     for river in _load_river_dictionary():
         if river in text:
-            return SlotValue(
-                value=river, source="dictionary_match", evidence=river, confidence=0.9
-            )
+            return SlotValue(value=river, source="dictionary_match", evidence=river, confidence=0.9)
 
     for match in _RIVER_SUFFIX_RE.finditer(text):
         if match.group(0) not in _RIVER_FALSE_POSITIVES:

@@ -40,7 +40,9 @@ class RateLimitedError(HistoryCollectorError):
         super().__init__(f"rate limited / blocked after retries: HTTP {status_code}")
 
 
-def build_client(*, timeout_seconds: float, transport: httpx.BaseTransport | None = None) -> httpx.Client:
+def build_client(
+    *, timeout_seconds: float, transport: httpx.BaseTransport | None = None
+) -> httpx.Client:
     timeout = httpx.Timeout(
         connect=timeout_seconds, read=timeout_seconds, write=timeout_seconds, pool=timeout_seconds
     )

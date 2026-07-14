@@ -8,7 +8,7 @@ import pytest
 import app.telegram_bot as telegram_bot
 from app.database import Database
 from app.telegram_bot import TelegramBotRunner, TelegramPollError
-from app.telegram_sender import TelegramSender, parse_callback_data
+from app.telegram_sender import TelegramSender
 from app.template_flow import build_initial_alert
 
 

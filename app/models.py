@@ -22,9 +22,7 @@ def compute_raw_hash(sender_or_region: str, sent_at: datetime, original_body: st
     Used verbatim as `raw_hash` on every record (even when a stable source_id
     exists) so dedup logic has a content-based check available too.
     """
-    payload = "\x1f".join(
-        [sender_or_region, sent_at.isoformat(), original_body]
-    ).encode("utf-8")
+    payload = "\x1f".join([sender_or_region, sent_at.isoformat(), original_body]).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 

@@ -114,9 +114,7 @@ def test_heatwave_upgraded_renders_exact_workbook_wording():
 
 
 def test_heatwave_upgraded_fails_when_required_slots_missing():
-    result = render_template(
-        "HT-03", {"발효일시": _slot("18:00"), "권역수": _slot("3")}
-    )
+    result = render_template("HT-03", {"발효일시": _slot("18:00"), "권역수": _slot("3")})
     assert not result.success
     assert "상향권역" in result.missing_slots
 

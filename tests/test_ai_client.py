@@ -131,9 +131,7 @@ def test_undeclared_slot_is_rejected(make_settings):
 
 def test_missing_evidence_is_rejected(make_settings):
     settings = make_settings(ai_enabled=True, openai_api_key="sk-test")
-    client = FakeClient(
-        completion=_completion(slots=[_slot_entry("기준시각", "15시", "")])
-    )
+    client = FakeClient(completion=_completion(slots=[_slot_entry("기준시각", "15시", "")]))
     result = _call(client, settings)
     assert result.status == "validation_failed"
     assert "evidence" in result.error
@@ -142,9 +140,7 @@ def test_missing_evidence_is_rejected(make_settings):
 def test_evidence_not_found_in_original_text_is_rejected(make_settings):
     settings = make_settings(ai_enabled=True, openai_api_key="sk-test")
     client = FakeClient(
-        completion=_completion(
-            slots=[_slot_entry("기준시각", "15시", "이 문구는 원문에 없습니다")]
-        )
+        completion=_completion(slots=[_slot_entry("기준시각", "15시", "이 문구는 원문에 없습니다")])
     )
     result = _call(client, settings)
     assert result.status == "validation_failed"

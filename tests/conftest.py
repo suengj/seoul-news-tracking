@@ -55,6 +55,7 @@ def build_settings(**overrides) -> Settings:
         openai_model="gpt-5-mini",
         openai_timeout_seconds=30.0,
         openai_max_retries=2,
+        telegram_slow_interaction_ms=2000,
     )
     defaults.update(overrides)
     return Settings(**defaults)

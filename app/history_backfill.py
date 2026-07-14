@@ -208,7 +208,9 @@ def run_backfill(
 
             if not parsed_list.rows:
                 status = RUN_STATUS_COMPLETED if db.unique_count() > 0 else RUN_STATUS_FAILED
-                last_error = None if status == RUN_STATUS_COMPLETED else "list page returned zero rows"
+                last_error = (
+                    None if status == RUN_STATUS_COMPLETED else "list page returned zero rows"
+                )
                 _persist(page_for_resume=current_page, run_status=status)
                 break
 

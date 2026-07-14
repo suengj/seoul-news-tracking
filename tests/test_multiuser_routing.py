@@ -394,7 +394,59 @@ def test_callback_with_missing_chat_data_fails_closed(db, settings, make_record)
     assert db._conn.execute("SELECT COUNT(*) AS c FROM template_actions").fetchone()["c"] == 0
 
 
-# 15. TELEGRAM_SEND_ENABLED=false: automatic broadcast disabled, interactive replies still work.
+# 16. /history list and selection stay in the originating private chat.
+
+
+def test_history_list_routes_per_user_private_chat(db, settings, make_record):
+    db.insert(make_record(source_id="HIST1"))
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+    bot.dispatch(_message_update(1, USER_A_ID, "/history", chat_id=USER_A_CHAT))
+    assert len(sent) == 1
+    assert sent[0]["chat_id"] == str(USER_A_CHAT)
+    assert sent[0]["chat_id"] != BROADCAST_CHAT
+    assert sent[0]["chat_id"] != str(USER_B_CHAT)
+
+
+def test_history_select_does_not_broadcast_or_insert_suggestion(db, settings, make_record):
+    from app.telegram_sender import make_history_callback_data
+
+    message_id = db.insert(make_record(source_id="HIST2", body="호우주의보 해제 [테스트구]"))
+    before = db._conn.execute("SELECT COUNT(*) AS c FROM template_suggestions").fetchone()["c"]
+    sender = FakeSender()
+    dispatch_callback(
+        db,
+        settings,
+        sender,
+        {
+            "id": "hist-mu",
+            "from": {"id": USER_B_ID},
+            "message": {"chat": {"id": USER_B_CHAT, "type": "private"}},
+            "data": make_history_callback_data(message_id),
+        },
+    )
+    after = db._conn.execute("SELECT COUNT(*) AS c FROM template_suggestions").fetchone()["c"]
+    assert before == after
+    assert sender.sent_chat_ids == [USER_B_CHAT]
+    assert all(e is False for e in sender.sent_enforce_send_enabled)
+
+
+def test_shared_group_preview_stays_in_group_chat(db, settings, make_record):
+    """Case B: both operators in one group — replies go to that group chat_id."""
+    group_chat = 400
+    message_id = db.insert(make_record(source_id="GRP1", body="호우주의보 해제 [테스트구]"))
+    sender = FakeSender()
+    dispatch_callback(
+        db,
+        settings,
+        sender,
+        _tpl_callback(message_id, "HW-05", user_id=USER_A_ID, chat_id=group_chat, cbq_id="g1"),
+    )
+    assert sender.sent_chat_ids == [group_chat]
+    preview = db._conn.execute(
+        "SELECT interaction_chat_id FROM template_previews ORDER BY preview_id DESC LIMIT 1"
+    ).fetchone()
+    assert preview["interaction_chat_id"] == str(group_chat)
 
 
 def test_send_disabled_blocks_broadcast_but_not_interactive(db, make_settings, make_record):

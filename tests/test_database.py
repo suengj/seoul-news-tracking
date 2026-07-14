@@ -83,7 +83,9 @@ def test_pending_retry_records_excludes_sent_and_baseline(db, make_record):
 
     failed = make_record(source_id="DS-FAILED")
     db.insert(failed)
-    db.update_telegram_result(failed.internal_id, status=TelegramStatus.TELEGRAM_FAILED, message_id=None)
+    db.update_telegram_result(
+        failed.internal_id, status=TelegramStatus.TELEGRAM_FAILED, message_id=None
+    )
 
     pending_ids = {r.source_id for r in db.pending_retry_records()}
     assert pending_ids == {"DS-FAILED"}
@@ -301,9 +303,7 @@ def test_snapshot_columns_migrate_onto_pre_change_schema(tmp_path):
     conn.close()
 
     migrated = Database(path)  # must not raise
-    row = migrated._conn.execute(
-        "SELECT * FROM template_decisions WHERE message_id = 1"
-    ).fetchone()
+    row = migrated._conn.execute("SELECT * FROM template_decisions WHERE message_id = 1").fetchone()
     assert row["final_rendered_text"] == "기존 문안"
     assert row["source_id_snapshot"] is None
     migrated.close()

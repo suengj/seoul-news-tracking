@@ -15,8 +15,7 @@ from app.models import DisasterMessageRecord
 
 
 class MessageFormatter(Protocol):
-    def format(self, record: DisasterMessageRecord) -> str:
-        ...
+    def format(self, record: DisasterMessageRecord) -> str: ...
 
 
 def format_for_future_channel(record: DisasterMessageRecord) -> str:

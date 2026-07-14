@@ -107,12 +107,17 @@ _RULES: list[_RuleSpec] = [
             ("contains 폭염주의보", _contains("폭염주의보")),
             ("contains 발효 or 발령", _contains("발효", "발령")),
         ],
-        conflicts=[("contains 폭염경보 (this is an upgrade, not a plain advisory)", _contains("폭염경보"))],
+        conflicts=[
+            ("contains 폭염경보 (this is an upgrade, not a plain advisory)", _contains("폭염경보"))
+        ],
     ),
     _RuleSpec(
         template_id="TN-01",
         groups=[
-            ("contains 열대야주의보 (explicit advisory phrase, not generic 무더위 wording)", _contains("열대야주의보")),
+            (
+                "contains 열대야주의보 (explicit advisory phrase, not generic 무더위 wording)",
+                _contains("열대야주의보"),
+            ),
         ],
         conflicts=[("contains 해제", _contains("해제"))],
     ),

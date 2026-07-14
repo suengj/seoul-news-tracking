@@ -421,6 +421,24 @@ class Database:
         row = cur.fetchone()
         return self._row_to_record(row) if row is not None else None
 
+    def get_recent_records(self, limit: int = 10) -> list[DisasterMessageRecord]:
+        """Most recent stored messages for `/history` (excludes baseline rows).
+
+        Ordered by source `sent_at` DESC, then `internal_id` DESC. `limit` is
+        clamped to [1, 20].
+        """
+        bounded = max(1, min(int(limit), 20))
+        cur = self._conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE is_baseline = 0
+            ORDER BY sent_at DESC, internal_id DESC
+            LIMIT ?
+            """,
+            (bounded,),
+        )
+        return [self._row_to_record(row) for row in cur.fetchall()]
+
     def get_by_internal_id(self, internal_id: int) -> DisasterMessageRecord | None:
         cur = self._conn.execute("SELECT * FROM messages WHERE internal_id = ?", (internal_id,))
         row = cur.fetchone()

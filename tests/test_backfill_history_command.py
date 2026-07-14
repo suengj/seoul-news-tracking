@@ -41,9 +41,17 @@ def test_main_uses_cli_overrides_over_settings(history_db_env, monkeypatch):
     def fake_run_backfill(db, **kwargs):
         captured.update(kwargs)
         return BackfillProgress(
-            run_id=1, current_page=1, pages_processed=0, fetched_count=0,
-            inserted_count=0, duplicate_count=0, malformed_count=0, error_count=0,
-            retry_count=0, target_count=kwargs["target_count"], unique_count=0,
+            run_id=1,
+            current_page=1,
+            pages_processed=0,
+            fetched_count=0,
+            inserted_count=0,
+            duplicate_count=0,
+            malformed_count=0,
+            error_count=0,
+            retry_count=0,
+            target_count=kwargs["target_count"],
+            unique_count=0,
             status="completed",
         )
 
@@ -67,9 +75,18 @@ def test_main_propagates_resume_error_as_exit_code(history_db_env, monkeypatch):
 def test_main_returns_nonzero_when_run_does_not_complete(history_db_env, monkeypatch):
     def fake_run_backfill(db, **kwargs):
         return BackfillProgress(
-            run_id=1, current_page=3, pages_processed=3, fetched_count=30,
-            inserted_count=10, duplicate_count=0, malformed_count=0, error_count=1,
-            retry_count=0, target_count=100, unique_count=10, status="failed",
+            run_id=1,
+            current_page=3,
+            pages_processed=3,
+            fetched_count=30,
+            inserted_count=10,
+            duplicate_count=0,
+            malformed_count=0,
+            error_count=1,
+            retry_count=0,
+            target_count=100,
+            unique_count=10,
+            status="failed",
         )
 
     monkeypatch.setattr(backfill_history, "run_backfill", fake_run_backfill)

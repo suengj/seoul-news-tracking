@@ -26,7 +26,9 @@ from app.template_rules import recommend_template, suggest_templates
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--message-id", type=int, help="internal_id in the real-time messages table")
+    parser.add_argument(
+        "--message-id", type=int, help="internal_id in the real-time messages table"
+    )
     parser.add_argument("--text", help="ad-hoc message text (used with --region/--sent-at)")
     parser.add_argument("--region", default="", help="sender_or_region for --text mode")
     parser.add_argument("--sent-at", help="ISO 8601 timestamp for --text mode (default: now)")
@@ -49,7 +51,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.text is not None:
         message_text = args.text
         region = args.region
-        sent_at = datetime.fromisoformat(args.sent_at) if args.sent_at else datetime.now().astimezone()
+        sent_at = (
+            datetime.fromisoformat(args.sent_at) if args.sent_at else datetime.now().astimezone()
+        )
     else:
         print("FAILED: pass either --message-id or --text", file=sys.stderr)
         return 1

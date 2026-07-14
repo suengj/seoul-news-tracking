@@ -66,7 +66,9 @@ class CollectionResult:
 
 
 def _build_client(transport: httpx.BaseTransport | None = None) -> httpx.Client:
-    timeout = httpx.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=READ_TIMEOUT)
+    timeout = httpx.Timeout(
+        connect=CONNECT_TIMEOUT, read=READ_TIMEOUT, write=READ_TIMEOUT, pool=READ_TIMEOUT
+    )
     return httpx.Client(
         headers={"User-Agent": USER_AGENT},
         timeout=timeout,

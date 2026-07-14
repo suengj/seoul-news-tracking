@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from app.ai_client import generate_slots
 from app.config import Settings
 from app.database import Database, TemplatePreview
 from app.models import DisasterMessageRecord, TelegramStatus
+from app.telegram_routing import chat_type_of, elapsed_ms_since, log_telegram_route
 from app.telegram_sender import (
     TelegramSender,
     TelegramSendOutcome,
@@ -43,6 +45,9 @@ from app.telegram_sender import (
     build_confirm_failed_message,
     build_confirmation_message,
     build_confirmed_preview_keyboard,
+    build_history_keyboard,
+    build_history_list_message,
+    build_history_missing_message,
     build_preview_complete_message,
     build_preview_incomplete_message,
     build_preview_keyboard,
@@ -53,6 +58,7 @@ from app.telegram_sender import (
     parse_back_callback_data,
     parse_callback_data,
     parse_category_callback_data,
+    parse_history_callback_data,
     parse_preview_callback_data,
 )
 from app.template_extractors import SlotValue, extract_slots
@@ -70,6 +76,7 @@ AI_PROMPT_VERSION = "v1"
 _ACTIVE_PREVIEW_STATUSES = ("rule_preview", "ai_preview")
 
 NO_MESSAGES_REPLY = "아직 저장된 재난문자가 없습니다."
+HISTORY_EMPTY_REPLY = "저장된 재난문자가 없습니다."
 
 
 def _slots_to_json(slots: dict[str, SlotValue]) -> str:
@@ -152,12 +159,23 @@ def send_initial_alert(
     the next retry pass.
     """
     text, keyboard, recommended, candidates = build_initial_alert(record, settings)
+    started = time.monotonic()
     outcome = sender.send_plain_text(
         text,
         chat_id=target_chat_id,
         reply_markup=keyboard,
         reply_to_message_id=reply_to_message_id,
         enforce_send_enabled=enforce_send_enabled,
+    )
+    delivery_mode = "broadcast" if enforce_send_enabled else "interactive"
+    log_telegram_route(
+        action="new_alert" if persist_suggestion else "replay_alert",
+        delivery_mode=delivery_mode,
+        outcome=outcome.status.value if hasattr(outcome.status, "value") else str(outcome.status),
+        elapsed_ms=elapsed_ms_since(started),
+        routed_chat_id=target_chat_id,
+        source_message_id=record.internal_id,
+        slow_threshold_ms=settings.telegram_slow_interaction_ms,
     )
 
     if persist_suggestion:
@@ -216,6 +234,32 @@ def send_latest_alert(
     )
 
 
+def send_history_list(
+    db: Database,
+    settings: Settings,
+    sender: TelegramSender,
+    *,
+    chat_id: str | int,
+    reply_to_message_id: int | None = None,
+) -> TelegramSendOutcome:
+    """Interactive `/history` list — no Broadcast, no template_suggestions."""
+    records = db.get_recent_records(limit=10)
+    if not records:
+        return sender.send_plain_text(
+            HISTORY_EMPTY_REPLY,
+            chat_id=chat_id,
+            reply_to_message_id=reply_to_message_id,
+            enforce_send_enabled=False,
+        )
+    return sender.send_plain_text(
+        build_history_list_message(len(records)),
+        chat_id=chat_id,
+        reply_to_message_id=reply_to_message_id,
+        reply_markup=build_history_keyboard(records),
+        enforce_send_enabled=False,
+    )
+
+
 def _authorized(settings: Settings, user_id: int | None) -> bool:
     return user_id is not None and user_id in settings.telegram_allowed_user_ids
 
@@ -223,9 +267,8 @@ def _authorized(settings: Settings, user_id: int | None) -> bool:
 def dispatch_callback(
     db: Database, settings: Settings, sender: TelegramSender, callback_query: dict
 ) -> None:
-    """Single entry point for every inline-button press: template selection,
-    preview confirm/cancel/AI. Authorization and the duplicate-callback guard
-    both happen here, before any routing.
+    """Single entry point for every inline-button press: history, category,
+    template selection, preview confirm/cancel/AI.
 
     Every response is routed to `interaction_chat_id` — the chat the
     callback's own message lives in (`callback_query.message.chat.id`) —
@@ -233,9 +276,10 @@ def dispatch_callback(
     missing (malformed update), the callback is acknowledged (stops the
     Telegram spinner) but nothing further happens: no default-chat fallback.
     """
+    started = time.monotonic()
     callback_query_id = callback_query.get("id", "")
     # Answer immediately so Telegram stops showing the loading spinner,
-    # regardless of what happens next.
+    # regardless of what happens next. Not gated by TELEGRAM_SEND_ENABLED.
     sender.answer_callback_query(callback_query_id)
 
     from_user = callback_query.get("from") or {}
@@ -244,6 +288,22 @@ def dispatch_callback(
     message = callback_query.get("message")
     chat = message.get("chat") if isinstance(message, dict) else None
     interaction_chat_id = chat.get("id") if isinstance(chat, dict) else None
+    chat_type = chat_type_of(chat if isinstance(chat, dict) else None)
+    threshold = settings.telegram_slow_interaction_ms
+
+    def _route(action: str, outcome: str, **extra: object) -> None:
+        log_telegram_route(
+            action=action,
+            delivery_mode="interactive",
+            outcome=outcome,
+            elapsed_ms=elapsed_ms_since(started),
+            chat_type=chat_type,
+            callback_query_id=callback_query_id or None,
+            operator_user_id=user_id if isinstance(user_id, int) else None,
+            routed_chat_id=interaction_chat_id,
+            slow_threshold_ms=threshold,
+            **extra,  # type: ignore[arg-type]
+        )
 
     if interaction_chat_id is None:
         logger.error(
@@ -251,6 +311,7 @@ def dispatch_callback(
             callback_query_id,
             user_id,
         )
+        _route("callback", "missing_chat_id")
         return
 
     if not _authorized(settings, user_id):
@@ -260,18 +321,39 @@ def dispatch_callback(
             user_id,
             interaction_chat_id,
         )
+        _route("callback", "unauthorized")
         return
 
     if callback_query_id and db.has_processed_callback(callback_query_id):
-        logger.info(
-            "callback_query_id=%s user_id=%s chat_id=%s outcome=duplicate_ignored",
-            callback_query_id,
-            user_id,
-            interaction_chat_id,
-        )
+        _route("callback", "duplicate_ignored")
         return
 
     data = callback_query.get("data") or ""
+
+    hist_id = parse_history_callback_data(data)
+    if hist_id is not None:
+        if callback_query_id:
+            db.mark_callback_processed(callback_query_id)
+        record = db.get_by_internal_id(hist_id)
+        if record is None:
+            sender.send_plain_text(
+                build_history_missing_message(),
+                chat_id=interaction_chat_id,
+                enforce_send_enabled=False,
+            )
+            _route("history_select", "missing_record", source_message_id=hist_id)
+            return
+        send_initial_alert(
+            sender,
+            db,
+            settings,
+            record,
+            target_chat_id=interaction_chat_id,
+            persist_suggestion=False,
+            enforce_send_enabled=False,
+        )
+        _route("history_select", "handled", source_message_id=hist_id)
+        return
 
     cat_parsed = parse_category_callback_data(data)
     if cat_parsed is not None:
@@ -285,17 +367,15 @@ def dispatch_callback(
                 reply_markup=build_category_keyboard(message_id, category_code),
                 enforce_send_enabled=False,
             )
-            logger.info(
-                "callback_query_id=%s user_id=%s chat_id=%s action=category_select "
-                "category=%s routed_chat_id=%s outcome=handled",
-                callback_query_id,
-                user_id,
-                interaction_chat_id,
-                category_code,
-                interaction_chat_id,
+            _route(
+                "category_select",
+                "handled",
+                source_message_id=message_id,
+                selected_template_id=category_code,
             )
         except Exception:
             logger.exception("category selection failed for message_id=%s", message_id)
+            _route("category_select", "failed", source_message_id=message_id)
         return
 
     back_parsed = parse_back_callback_data(data)
@@ -310,16 +390,10 @@ def dispatch_callback(
                 reply_markup=build_selection_keyboard(message_id),
                 enforce_send_enabled=False,
             )
-            logger.info(
-                "callback_query_id=%s user_id=%s chat_id=%s action=back "
-                "routed_chat_id=%s outcome=handled",
-                callback_query_id,
-                user_id,
-                interaction_chat_id,
-                interaction_chat_id,
-            )
+            _route("back", "handled", source_message_id=message_id)
         except Exception:
             logger.exception("back navigation failed for message_id=%s", message_id)
+            _route("back", "failed", source_message_id=message_id)
         return
 
     tpl_parsed = parse_callback_data(data)
@@ -338,16 +412,15 @@ def dispatch_callback(
                 callback_query_id=callback_query_id,
                 interaction_chat_id=interaction_chat_id,
             )
-            logger.info(
-                "callback_query_id=%s user_id=%s chat_id=%s action=template_select "
-                "routed_chat_id=%s outcome=handled",
-                callback_query_id,
-                user_id,
-                interaction_chat_id,
-                interaction_chat_id,
+            _route(
+                "template_select",
+                "handled",
+                source_message_id=message_id,
+                selected_template_id=template_id,
             )
         except Exception:
             logger.exception("template selection handling failed for message_id=%s", message_id)
+            _route("template_select", "failed", source_message_id=message_id)
         return
 
     preview_parsed = parse_preview_callback_data(data)
@@ -355,6 +428,7 @@ def dispatch_callback(
         preview_id, action = preview_parsed
         if callback_query_id:
             db.mark_callback_processed(callback_query_id)
+        is_ai = action == "ai"
         try:
             if action == "confirm":
                 _handle_preview_confirm(
@@ -383,27 +457,37 @@ def dispatch_callback(
                     user_id=user_id,
                     interaction_chat_id=interaction_chat_id,
                 )
-            logger.info(
-                "callback_query_id=%s user_id=%s chat_id=%s action=preview_%s "
-                "routed_chat_id=%s outcome=handled",
-                callback_query_id,
-                user_id,
-                interaction_chat_id,
-                action,
-                interaction_chat_id,
+            log_telegram_route(
+                action=f"preview_{action}",
+                delivery_mode="interactive",
+                outcome="handled",
+                elapsed_ms=elapsed_ms_since(started),
+                chat_type=chat_type,
+                callback_query_id=callback_query_id or None,
+                operator_user_id=user_id if isinstance(user_id, int) else None,
+                routed_chat_id=interaction_chat_id,
+                slow_threshold_ms=threshold,
+                is_ai=is_ai,
             )
         except Exception:
             logger.exception(
                 "preview action=%s handling failed for preview_id=%s", action, preview_id
             )
+            log_telegram_route(
+                action=f"preview_{action}",
+                delivery_mode="interactive",
+                outcome="failed",
+                elapsed_ms=elapsed_ms_since(started),
+                chat_type=chat_type,
+                callback_query_id=callback_query_id or None,
+                operator_user_id=user_id if isinstance(user_id, int) else None,
+                routed_chat_id=interaction_chat_id,
+                slow_threshold_ms=threshold,
+                is_ai=is_ai,
+            )
         return
 
-    logger.warning(
-        "callback_query_id=%s user_id=%s chat_id=%s outcome=malformed_data",
-        callback_query_id,
-        user_id,
-        interaction_chat_id,
-    )
+    _route("callback", "malformed_data")
 
 
 def _handle_template_selection(

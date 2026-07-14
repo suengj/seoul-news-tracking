@@ -27,11 +27,10 @@ for how to obtain a bot token and chat ID. On-demand AI extraction
 "On-demand AI" below.
 
 `TELEGRAM_CHAT_ID` is the automatic-broadcast destination only. Every
-interactive request (`/latest`, ordinary text, `/status`, `/pause`,
-`/resume`, `/help`, any template/preview button) always replies to the chat
+interactive request (`/latest`, `/history`, ordinary text, `/status`, `/pause`,
+`/resume`, `/help`, any template/preview/history button) always replies to the chat
 it came from instead — see `docs/service_v1.md` "Broadcast vs. interactive
-delivery" for the full distinction, including how to diagnose a reply that
-seems to have gone to the wrong chat. Current version: see
+delivery" and `docs/telegram_routing_validation.md`. Current version: see
 `docs/versioning.md` (also shown in `/status` and the bot's startup log).
 
 ## Commands
@@ -51,6 +50,13 @@ python -m app.commands.poll_once --send
 # The full local runtime: one recurring poller (POLL_INTERVAL_SECONDS,
 # default 300s) + one unified Telegram bot process, together, until Ctrl+C.
 python -m app.commands.run_local
+
+# Offline routing validation (no network)
+python -m app.commands.validate_telegram_behavior
+
+# Template workbook sync
+python -m app.commands.sync_templates_from_excel --check
+python -m app.commands.sync_templates_from_excel --write
 
 # Or run either piece on its own:
 python -m app.commands.run_poller

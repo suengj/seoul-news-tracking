@@ -125,7 +125,10 @@ def _build_messages(
     optional_slots: list[str],
     existing_rule_slots: dict[str, SlotValue],
 ) -> list[dict]:
-    hints = "\n".join(f"- {name}: {slot.value}" for name, slot in existing_rule_slots.items()) or "(없음)"
+    hints = (
+        "\n".join(f"- {name}: {slot.value}" for name, slot in existing_rule_slots.items())
+        or "(없음)"
+    )
     system = (
         "You extract structured field values for a fixed Korean disaster-alert "
         "message template. Only use information explicitly present in the "
@@ -197,7 +200,9 @@ def generate_slots(
     usage = getattr(completion, "usage", None)
     input_tokens = getattr(usage, "prompt_tokens", None) if usage else None
     output_tokens = getattr(usage, "completion_tokens", None) if usage else None
-    raw_response_json = completion.model_dump_json() if hasattr(completion, "model_dump_json") else None
+    raw_response_json = (
+        completion.model_dump_json() if hasattr(completion, "model_dump_json") else None
+    )
 
     choice = completion.choices[0]
     if getattr(choice.message, "refusal", None):

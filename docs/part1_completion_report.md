@@ -367,3 +367,12 @@ two authorized operators in separate chats vs. an unauthorized chat) was
 added across `tests/test_telegram_bot.py` and `tests/test_template_flow.py`,
 alongside the existing rendering-parity/duplicate-callback/AI-path
 coverage — see the final report for pass counts.
+
+## 0.3.0: `/history` + routing validation
+
+Added `/history`, delivery-mode/latency logs, offline
+`validate_telegram_behavior`, and callback-ack not gated by Broadcast.
+Cross-user private-chat isolation remains enforced; shared-group visibility
+is documented as expected Telegram behavior (see
+`docs/telegram_routing_validation.md`). Live two-user private-chat check is
+required before tagging `v0.3.0`.

@@ -13,7 +13,12 @@ import sys
 
 from app.config import HISTORY_DETAIL_URL, HISTORY_LIST_URL, load_settings
 from app.history_backfill import DEFAULT_CNT_PER_PAGE, DEFAULT_PAGE_SIZE
-from app.history_collector import HistoryCollectorError, build_client, fetch_detail_page, fetch_list_page
+from app.history_collector import (
+    HistoryCollectorError,
+    build_client,
+    fetch_detail_page,
+    fetch_list_page,
+)
 from app.history_parser import parse_detail_page, parse_list_page
 from app.logging_config import configure_logging
 

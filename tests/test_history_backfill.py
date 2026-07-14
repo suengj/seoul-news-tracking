@@ -6,7 +6,12 @@ import httpx
 import pytest
 
 from app.history_backfill import run_backfill
-from app.history_database import HistoryDatabase, RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_PAUSED
+from app.history_database import (
+    HistoryDatabase,
+    RUN_STATUS_COMPLETED,
+    RUN_STATUS_FAILED,
+    RUN_STATUS_PAUSED,
+)
 
 
 def _list_html(sns_dates_texts: list[tuple[str, str, str]], total: int) -> str:
@@ -45,7 +50,13 @@ class FakeSite:
     """Deterministic in-memory stand-in for the archive: `total` sequential
     records, newest (highest sn) first, paginated exactly like the real site."""
 
-    def __init__(self, total: int, *, malformed_sns: set[str] = frozenset(), rate_limited_sns: set[str] = frozenset()):
+    def __init__(
+        self,
+        total: int,
+        *,
+        malformed_sns: set[str] = frozenset(),
+        rate_limited_sns: set[str] = frozenset(),
+    ):
         self.total = total
         self.malformed_sns = malformed_sns
         self.rate_limited_sns = set(rate_limited_sns)
@@ -60,7 +71,9 @@ class FakeSite:
             if sn in self.rate_limited_sns:
                 self.rate_limited_sns.discard(sn)  # only rate-limit once, then succeed on retry
                 return httpx.Response(429, text="slow down")
-            return httpx.Response(200, text=_detail_html(sn, include_body=sn not in self.malformed_sns))
+            return httpx.Response(
+                200, text=_detail_html(sn, include_body=sn not in self.malformed_sns)
+            )
 
         current_page = int(params["currentPage"])
         cnt_per_page = int(params["cntPerPage"])
@@ -115,7 +128,9 @@ def test_malformed_record_does_not_block_reaching_target(db):
     assert result.status == RUN_STATUS_COMPLETED
     assert db.unique_count() == 10
     assert result.malformed_count == 1
-    assert result.pages_processed == 2  # had to continue into page 2 to make up for the malformed skip
+    assert (
+        result.pages_processed == 2
+    )  # had to continue into page 2 to make up for the malformed skip
 
 
 def test_graceful_shutdown_persists_progress_and_resume_completes(db):
@@ -160,7 +175,7 @@ def test_graceful_shutdown_persists_progress_and_resume_completes(db):
 
     # already-inserted records must not be re-fetched on resume (idempotent, no wasted requests)
     already_known = set(detail_calls_before_resume)
-    calls_since_resume = site.detail_calls[len(detail_calls_before_resume):]
+    calls_since_resume = site.detail_calls[len(detail_calls_before_resume) :]
     refetched_known = [sn for sn in calls_since_resume if sn in already_known]
     assert refetched_known == []
 

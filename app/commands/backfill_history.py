@@ -84,8 +84,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.status:
         return _print_status(settings)
 
-    target_count = args.target_count if args.target_count is not None else settings.history_target_count
-    delay_seconds = args.delay_seconds if args.delay_seconds is not None else settings.history_request_delay_seconds
+    target_count = (
+        args.target_count if args.target_count is not None else settings.history_target_count
+    )
+    delay_seconds = (
+        args.delay_seconds
+        if args.delay_seconds is not None
+        else settings.history_request_delay_seconds
+    )
 
     stop_requested = {"flag": False}
 

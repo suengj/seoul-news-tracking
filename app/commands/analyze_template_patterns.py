@@ -157,7 +157,9 @@ def _count_and_examples(
     return count, [_short(row["body_raw"]) for row in rows]
 
 
-def _wording_variation_counts(conn: sqlite3.Connection, where_sql: str, params: list[str]) -> dict[str, int]:
+def _wording_variation_counts(
+    conn: sqlite3.Connection, where_sql: str, params: list[str]
+) -> dict[str, int]:
     """Count a fixed set of connector/transition words within the matched set."""
     variation_terms = ["발효", "발령", "해제", "상향", "하향", "변경", "대치", "기준", "부로"]
     counts: dict[str, int] = {}
@@ -182,7 +184,11 @@ def _sample_field_evidence(examples: list[str]) -> dict[str, int]:
     river_hits = sum(1 for ex in examples if _RIVER_RE.search(ex))
     time_hits = sum(1 for ex in examples if _TIME_ANCHOR_RE.search(ex))
     region_hits = sum(1 for ex in examples if "[" in ex and "]" in ex)
-    return {"river_name_token": river_hits, "time_anchor_phrase": time_hits, "bracketed_region": region_hits}
+    return {
+        "river_name_token": river_hits,
+        "time_anchor_phrase": time_hits,
+        "bracketed_region": region_hits,
+    }
 
 
 def _ambiguous_examples(conn: sqlite3.Connection, template_id: str) -> list[str]:
@@ -316,19 +322,27 @@ def _render_markdown(report: dict) -> str:
         if terms["must_contain_any"]:
             term_bits.append("any of " + ", ".join(f"`{t}`" for t in terms["must_contain_any"]))
         if terms["must_not_contain_any"]:
-            term_bits.append("none of " + ", ".join(f"`{t}`" for t in terms["must_not_contain_any"]))
+            term_bits.append(
+                "none of " + ", ".join(f"`{t}`" for t in terms["must_not_contain_any"])
+            )
         lines.append("**Search terms**: " + "; ".join(term_bits))
         lines.append("")
         lines.append(f"**Historical candidate count**: {entry['candidate_count']}")
         lines.append("")
         lines.append(
             "**Wording variation counts** (within candidates): "
-            + (", ".join(f"{k}={v}" for k, v in entry["wording_variation_counts"].items()) or "(none)")
+            + (
+                ", ".join(f"{k}={v}" for k, v in entry["wording_variation_counts"].items())
+                or "(none)"
+            )
         )
         lines.append("")
         lines.append(
             "**Field evidence in sampled examples**: "
-            + ", ".join(f"{k}={v}/{len(entry['examples'])}" for k, v in entry["field_evidence_in_sample"].items())
+            + ", ".join(
+                f"{k}={v}/{len(entry['examples'])}"
+                for k, v in entry["field_evidence_in_sample"].items()
+            )
         )
         lines.append("")
         lines.append(f"**Proposed rule phrases**: {entry['notes']}")
@@ -347,7 +361,9 @@ def _render_markdown(report: dict) -> str:
         else:
             lines.append("- (none found)")
         lines.append("")
-        lines.append("**Examples that should remain UNKNOWN** (broad term match, specific rule fails):")
+        lines.append(
+            "**Examples that should remain UNKNOWN** (broad term match, specific rule fails):"
+        )
         if entry["unknown_leaning_examples"]:
             for ex in entry["unknown_leaning_examples"]:
                 lines.append(f"- {ex}")

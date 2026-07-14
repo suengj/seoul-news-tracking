@@ -14,8 +14,7 @@ from app.models import DisasterMessageRecord
 
 
 class TriggerRule(Protocol):
-    def matches(self, record: DisasterMessageRecord) -> bool:
-        ...
+    def matches(self, record: DisasterMessageRecord) -> bool: ...
 
 
 def evaluate_triggers(record: DisasterMessageRecord) -> list[str]:

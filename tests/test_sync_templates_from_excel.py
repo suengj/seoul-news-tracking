@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 
 from app.commands.sync_templates_from_excel import (
     build_from_workbook,

@@ -36,13 +36,19 @@ from app.config import Settings
 from app.database import Database
 from app.models import TelegramStatus
 from app.process_lock import SingleInstanceLock
+from app.telegram_routing import (
+    chat_type_of,
+    elapsed_ms_since,
+    log_telegram_route,
+    normalize_bot_command,
+)
 from app.telegram_sender import (
     TELEGRAM_API_BASE,
     TelegramSender,
     escape_markdown_v2,
     format_timestamp,
 )
-from app.template_flow import dispatch_callback, send_latest_alert
+from app.template_flow import dispatch_callback, send_history_list, send_latest_alert
 from app.version import get_version
 
 __all__ = [
@@ -63,7 +69,8 @@ INITIAL_BACKOFF_SECONDS = 1.0
 UNAUTHORIZED_REPLY = escape_markdown_v2("이 봇을 사용할 권한이 없습니다.")
 HELP_TEXT = escape_markdown_v2(
     "사용 가능한 명령어:\n"
-    "/latest - 가장 최근 수집된 재난문자 조회\n"
+    "/latest - 가장 최근 재난문자 조회\n"
+    "/history - 최근 재난문자 10건 선택\n"
     "/status - 시스템 상태 조회\n"
     "/pause - 자동 수집 및 알림 일시정지\n"
     "/resume - 자동 수집 및 알림 재개\n"
@@ -235,6 +242,7 @@ class TelegramBotRunner:
         return data.get("result", [])
 
     def dispatch(self, update: dict[str, Any]) -> DispatchOutcome:
+        started = time.monotonic()
         update_id = update.get("update_id") if isinstance(update, dict) else None
 
         if not isinstance(update, dict):
@@ -254,6 +262,7 @@ class TelegramBotRunner:
 
         chat = message.get("chat")
         chat_id = chat.get("id") if isinstance(chat, dict) else None
+        chat_type = chat_type_of(chat if isinstance(chat, dict) else None)
         message_id = message.get("message_id")
         from_user = message.get("from")
         user_id = from_user.get("id") if isinstance(from_user, dict) else None
@@ -269,36 +278,41 @@ class TelegramBotRunner:
 
         authorized = user_id in self.settings.telegram_allowed_user_ids
         stripped = text.strip()
-        command = stripped.split()[0].lower() if stripped else ""
+        command = normalize_bot_command(stripped)
         command_category = command if command.startswith("/") else "(text)"
+        threshold = self.settings.telegram_slow_interaction_ms
 
         if not authorized:
             logger.warning(
                 "rejected unauthorized user_id=%s command=%r", user_id, command or "(text)"
             )
             self._reply(chat_id, message_id, UNAUTHORIZED_REPLY)
-            logger.info(
-                "update_id=%s type=message user_id=%s chat_id=%s command=%s "
-                "routed_chat_id=%s outcome=unauthorized",
-                update_id,
-                user_id,
-                chat_id,
-                command_category,
-                chat_id,
+            log_telegram_route(
+                action=command_category,
+                delivery_mode="interactive",
+                outcome="unauthorized",
+                elapsed_ms=elapsed_ms_since(started),
+                chat_type=chat_type,
+                update_id=update_id,
+                operator_user_id=user_id,
+                routed_chat_id=chat_id,
+                slow_threshold_ms=threshold,
             )
             return DispatchOutcome(handled=True, authorized=False, command=command)
 
         reply_text = self._handle_authorized(stripped, command, user_id, chat_id, message_id)
         if reply_text is not None:
             self._reply(chat_id, message_id, reply_text)
-        logger.info(
-            "update_id=%s type=message user_id=%s chat_id=%s command=%s "
-            "routed_chat_id=%s outcome=handled",
-            update_id,
-            user_id,
-            chat_id,
-            command_category,
-            chat_id,
+        log_telegram_route(
+            action=command_category if command.startswith("/") else "latest_text",
+            delivery_mode="interactive",
+            outcome="handled",
+            elapsed_ms=elapsed_ms_since(started),
+            chat_type=chat_type,
+            update_id=update_id,
+            operator_user_id=user_id,
+            routed_chat_id=chat_id,
+            slow_threshold_ms=threshold,
         )
         return DispatchOutcome(handled=True, authorized=True, command=command)
 
@@ -307,6 +321,9 @@ class TelegramBotRunner:
     ) -> str | None:
         if command == "/latest":
             self._send_latest_alert(chat_id)
+            return None
+        if command == "/history":
+            self._send_history(chat_id)
             return None
         if command == "/status":
             return build_status_reply(self.db, self.settings)
@@ -318,9 +335,8 @@ class TelegramBotRunner:
             return HELP_TEXT
         if command == "/shutdown":
             return self._handle_shutdown(user_id)
-        # Ordinary text behaves the same as /latest: the exact same
-        # rendering path a newly detected message uses (see
-        # `app.template_flow.send_initial_alert`), not a separate summary.
+        # Ordinary text (and unrecognized slash commands other than the ones
+        # above) behaves the same as /latest.
         self._send_latest_alert(chat_id)
         return None
 
@@ -328,6 +344,11 @@ class TelegramBotRunner:
         outcome = send_latest_alert(self.db, self.settings, self.sender, chat_id=chat_id)
         if outcome.status == TelegramStatus.TELEGRAM_FAILED:
             logger.error("failed to send /latest alert to chat_id=%s: %s", chat_id, outcome.error)
+
+    def _send_history(self, chat_id: int) -> None:
+        outcome = send_history_list(self.db, self.settings, self.sender, chat_id=chat_id)
+        if outcome.status == TelegramStatus.TELEGRAM_FAILED:
+            logger.error("failed to send /history to chat_id=%s: %s", chat_id, outcome.error)
 
     def _handle_pause(self, user_id: int) -> str:
         changed = self.db.pause_polling(actor_user_id=user_id)

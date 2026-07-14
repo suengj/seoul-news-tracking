@@ -16,13 +16,13 @@ from datetime import datetime
 from app.template_extractors import extract_slots
 
 TEMPLATE_IDS: tuple[str, ...] = (
-    "FLOOD_ADVISORY_ISSUED",
-    "HEAVY_RAIN_CLEARED",
-    "HEAVY_RAIN_DOWNGRADED",
-    "HEAVY_RAIN_MULTI_LEVEL_ISSUED",
-    "HEATWAVE_UPGRADED",
-    "HEATWAVE_ADVISORY_ISSUED",
-    "TROPICAL_NIGHT_ADVISORY_ISSUED",
+    "FL-01",
+    "HW-05",
+    "HW-04",
+    "HEAVY_RAIN_MULTI_LEVEL_ISSUED",  # legacy-hidden only; kept for scoring continuity
+    "HT-03",
+    "HT-01",
+    "TN-01",
 )
 
 
@@ -52,7 +52,7 @@ def _contains(*terms: str) -> Callable[[str], bool]:
 
 _RULES: list[_RuleSpec] = [
     _RuleSpec(
-        template_id="FLOOD_ADVISORY_ISSUED",
+        template_id="FL-01",
         groups=[
             ("contains 홍수주의보", _contains("홍수주의보")),
             ("contains 발령 or 발효", _contains("발령", "발효")),
@@ -60,7 +60,7 @@ _RULES: list[_RuleSpec] = [
         conflicts=[("contains 해제 (already cleared)", _contains("해제"))],
     ),
     _RuleSpec(
-        template_id="HEAVY_RAIN_CLEARED",
+        template_id="HW-05",
         groups=[
             ("contains 호우", _contains("호우")),
             ("contains 해제", _contains("해제")),
@@ -73,7 +73,7 @@ _RULES: list[_RuleSpec] = [
         ],
     ),
     _RuleSpec(
-        template_id="HEAVY_RAIN_DOWNGRADED",
+        template_id="HW-04",
         groups=[
             ("contains 호우경보", _contains("호우경보")),
             ("contains 호우주의보", _contains("호우주의보")),
@@ -93,7 +93,7 @@ _RULES: list[_RuleSpec] = [
         ],
     ),
     _RuleSpec(
-        template_id="HEATWAVE_UPGRADED",
+        template_id="HT-03",
         groups=[
             ("contains 폭염주의보", _contains("폭염주의보")),
             ("contains 폭염경보", _contains("폭염경보")),
@@ -102,7 +102,7 @@ _RULES: list[_RuleSpec] = [
         conflicts=[("contains 해제 or 하향", _contains("해제", "하향"))],
     ),
     _RuleSpec(
-        template_id="HEATWAVE_ADVISORY_ISSUED",
+        template_id="HT-01",
         groups=[
             ("contains 폭염주의보", _contains("폭염주의보")),
             ("contains 발효 or 발령", _contains("발효", "발령")),
@@ -110,7 +110,7 @@ _RULES: list[_RuleSpec] = [
         conflicts=[("contains 폭염경보 (this is an upgrade, not a plain advisory)", _contains("폭염경보"))],
     ),
     _RuleSpec(
-        template_id="TROPICAL_NIGHT_ADVISORY_ISSUED",
+        template_id="TN-01",
         groups=[
             ("contains 열대야주의보 (explicit advisory phrase, not generic 무더위 wording)", _contains("열대야주의보")),
         ],

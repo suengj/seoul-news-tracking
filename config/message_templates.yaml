@@ -1,183 +1,725 @@
-version: 1
-
+version: 2
+source:
+  workbook: templates/서울시_재난특보_X템플릿.xlsx
+  catalog_sheet: 01_템플릿목록
+  wording_sheet: 02_문안템플릿
 templates:
-  - id: FLOOD_ADVISORY_ISSUED
-    display_name: "홍수주의보 발효 안내"
-    button_label: "🌊 홍수주의보"
-    enabled: true
-    required_slots:
-      - 기준시각
-      - 하천명
-    optional_slots: []
-    text: |
-      📢 홍수주의보 발효 안내
-      ({기준시각} 기준)
+- id: HW-01
+  category_code: HW
+  disaster_type: 호우
+  level: 주의보
+  state: 발효
+  display_name: 호우주의보 발효
+  button_label: 주의보 발효
+  section: 호우 발효
+  trigger_condition: 서울 지역 호우주의보 발효 (경보 아님)
+  review_status: confirmed
+  review_label: 확정 · 변경금지
+  automation: true
+  enabled: true
+  menu_order: 2
+  aliases: []
+  required_slots:
+  - 발효일시
+  - 지역
+  optional_slots: []
+  text: |
+    📢 서울 호우주의보 발효 ({발효일시})
 
-      ☔ 홍수주의보
-      {하천명}
+    {지역}에 호우주의보가 발효되었습니다.
 
-      하천 수위가 상승하고 있습니다.
+    ⚠️ 노면 미끄러움 — 빗길 운행 주의
+    ⚠️ 하천·산림 등 위험지역 통행 자제
+    ⚠️ 상습 침수지역 주민은 기상 상황 수시 확인 및 유사 시 신속 대피
 
-      하천변과 산책로,
-      저지대 출입을 자제하시고
-      안전한 곳으로 이동해 주세요.
+    📌 실시간 재난예보·행동요령
+    👉 서울안전누리 http://safecity.seoul.go.kr
+- id: HW-02
+  category_code: HW
+  disaster_type: 호우
+  level: 경보
+  state: 발효
+  display_name: 호우경보 발효
+  button_label: 경보 발효
+  section: 호우 발효
+  trigger_condition: 서울 지역 호우경보 신규 발효 (직전 주의보 없음)
+  review_status: review_required
+  review_label: ★부서검수 필요
+  automation: true
+  enabled: true
+  menu_order: 3
+  aliases: []
+  required_slots:
+  - 발효일시
+  - 지역
+  optional_slots: []
+  text: |
+    📢 서울 호우경보 발효 ({발효일시})
 
-      📌 실시간 재난예보·행동요령
-      서울안전누리
-      👉 safecity.seoul.go.kr
+    {지역}에 호우경보가 발효되었습니다.
 
-  - id: HEAVY_RAIN_CLEARED
-    display_name: "호우특보 해제"
-    button_label: "☔ 호우 해제"
-    enabled: true
-    required_slots:
-      - 지역
-      - 해제시각
-    optional_slots: []
-    text: |
-      📢 [안내]
+    ⚠️ 하천변·지하차도·반지하 등 침수 위험지역 출입 중단
+    ⚠️ 저지대 주차 차량은 안전한 곳으로 이동
+    ⚠️ 대피 권고 시 즉시 안전한 곳으로 이동
+    (🚨긴급상황 신고 119)
 
-      {지역}에 발효되었던
-      호우특보는 {해제시각}부로 해제되었습니다.
+    📌 실시간 재난예보·행동요령
+    👉 서울안전누리 http://safecity.seoul.go.kr
+- id: HW-03
+  category_code: HW
+  disaster_type: 호우
+  level: 경보
+  state: 상향
+  display_name: 호우경보 상향
+  button_label: 경보 상향
+  section: 호우 상향
+  trigger_condition: 직전 상태가 호우주의보 → 경보로 상향
+  review_status: review_required
+  review_label: ★부서검수 필요
+  automation: true
+  enabled: true
+  menu_order: 4
+  aliases: []
+  required_slots:
+  - 발효일시
+  - 지역
+  optional_slots: []
+  text: |
+    📢{발효일시} 부로,
+    {지역} 호우주의보가
+    호우경보로 상향되었습니다.
 
-  - id: HEAVY_RAIN_DOWNGRADED
-    display_name: "호우경보 하향"
-    button_label: "☔ 호우 하향"
-    enabled: true
-    required_slots:
-      - 기준일시
-      - 지역
-    optional_slots: []
-    text: |
-      📢 {기준일시} 기준
+    하천 수위 급상승과 저지대·지하공간 침수 위험이 커지고 있습니다.
 
-      {지역} 호우경보가
-      호우주의보로 하향되었습니다.
+    ⚠️ 하천변·지하차도·지하공간 출입 중단
+    ⚠️ 대피 권고 시 즉시 안전한 곳으로 이동
 
-      하천 수위 상승과 침수 위험은 남아있으니,
+    📌 실시간 재난예보·행동요령
+    👉 서울안전누리 http://safecity.seoul.go.kr
+- id: HW-04
+  category_code: HW
+  disaster_type: 호우
+  level: 주의보
+  state: 하향
+  display_name: 호우주의보 하향
+  button_label: 주의보 하향
+  section: 호우 하향
+  trigger_condition: 직전 상태가 호우경보 → 주의보로 하향
+  review_status: confirmed
+  review_label: 확정 · 변경금지
+  automation: true
+  enabled: true
+  menu_order: 5
+  aliases:
+  - HEAVY_RAIN_DOWNGRADED
+  required_slots:
+  - 기준일시
+  - 지역
+  optional_slots: []
+  text: |
+    📢 {기준일시} 기준
 
-      하천변·지하차도·지하공간 출입은 자제해 주세요.
+    {지역} 호우경보가
+    호우주의보로 하향되었습니다.
 
-      📌 실시간 재난예보·행동요령
-      서울안전누리
-      👉 safecity.seoul.go.kr
+    하천 수위 상승과 침수 위험은 남아있으니,
 
-  - id: HEAVY_RAIN_MULTI_LEVEL_ISSUED
-    display_name: "호우특보 발효 안내"
-    button_label: "☔ 호우 복합"
-    enabled: true
-    required_slots:
-      - 지역
-      - 기준시각
-    optional_slots:
-      - 경보지역
-      - 주의보지역
-      - 홍수지역
-    text: |
-      📢 {지역} 호우특보 발효 안내
-      ({기준시각} 기준)
+    하천변·지하차도·지하공간 출입은 자제해 주세요.
 
-      {#경보지역}☔ 호우경보
-      {경보지역}
+    📌 실시간 재난예보·행동요령
+    서울안전누리
+    👉 http://safecity.seoul.go.kr
+- id: HW-05
+  category_code: HW
+  disaster_type: 호우
+  level: '-'
+  state: 해제
+  display_name: 호우특보 해제
+  button_label: 특보 해제
+  section: 호우 해제
+  trigger_condition: 호우특보 전면 해제
+  review_status: confirmed
+  review_label: 확정 · 변경금지
+  automation: true
+  enabled: true
+  menu_order: 6
+  aliases:
+  - HEAVY_RAIN_CLEARED
+  required_slots:
+  - 지역
+  - 해제일시
+  optional_slots: []
+  text: |
+    📢 [안내]
 
-      {/경보지역}{#주의보지역}☔ 호우주의보
-      {주의보지역}
+    {지역}에 발효되었던
+    호우특보는 {해제일시}부로 해제되었습니다.
+- id: HW-06
+  category_code: HW
+  disaster_type: 호우
+  level: 예비특보
+  state: 예고
+  display_name: 호우예비특보 예고
+  button_label: 예비특보
+  section: 호우 예고
+  trigger_condition: 기상청 호우 예비특보 발표 (특보 발효 전)
+  review_status: confirmed
+  review_label: 확정 · 변경금지
+  automation: true
+  enabled: true
+  menu_order: 7
+  aliases: []
+  required_slots:
+  - 일자
+  - 시작시각
+  - 종료시각
+  - 지역
+  optional_slots: []
+  text: |
+    📢서울 호우 예비특보 안내
+    오늘({일자}) {시작시각}부터 {종료시각}까지, {지역}에 #호우
+    예비특보가 예고되어 있습니다.
 
-      {/주의보지역}{#홍수지역}☔ 홍수주의보
-      {홍수지역}
+    가급적 대중교통 이용 및 하천·산림 주변 등 위험지역 통행을
+    자제하고, 상습 침수 및 산림 인근 지역 주민들은 기상 상황과
+    재난문자를 수시로 확인하시기 바랍니다.
+    *유사 시 신속히 대피해 주세요.
 
-      {/홍수지역}하천 수위 상승과 저지대·지하공간 침수가 우려됩니다.
+    ⚠️호우 발생 시 행동요령⚠️
+    ✔️외출 자제 및 대중교통 이용
+    ✔️하천변 산책로·산림 인근 방문 자제
+    ✔️산사태 우려지역 주민은 유사 시 대피
+    ✔️TV·인터넷 등을 통해 기상예보 및 호우상황 수시 확인
+    ☎️긴급상황 발생 시 119 신고
 
-      하천변·산책로·둔치·공사장 등
-      위험지역 출입을 자제하고,
-      대피 권고 시 즉시 안전한 곳으로 이동해 주세요.
+    📲 실시간 속보·행동요령
+    👉 http://safecity.seoul.go.kr
+- id: HW-07
+  category_code: HW
+  disaster_type: 호우
+  level: 경보
+  state: 연계
+  display_name: 호우경보 연계
+  button_label: 교통 연계
+  section: 호우 연계
+  trigger_condition: 호우경보 + 대중교통 증편/도로통제 발생 시
+  review_status: confirmed
+  review_label: 확정 · 변경금지
+  automation: true
+  enabled: true
+  menu_order: 8
+  aliases: []
+  required_slots:
+  - 일자
+  optional_slots: []
+  text: |
+    📢{일자} 서울 #호우경보, 퇴근길 대중교통 운행 확대
 
-      📌 실시간 재난예보·행동요령
-      서울안전누리
-      👉 safecity.seoul.go.kr
+    한강 및 하천 수위 상승으로 주요도로가 통제 중입니다.
+    경보 해제 시까지 출·퇴근시간대 대중교통이 증편 운행되니
+    가급적 대중교통을 이용해주시고,
+    한강공원 및 하천 접근을 자제하시기 바랍니다
 
-  - id: HEATWAVE_UPGRADED
-    display_name: "폭염경보 상향"
-    button_label: "🔥 폭염 상향"
-    enabled: true
-    required_slots:
-      - 발표일시
-      - 지역
-    optional_slots:
-      - 유지지역
-    text: |
-      🚨 {발표일시}부로,
-      {지역}이(가)
-      폭염주의보에서 폭염경보로 상향되었습니다.
+    🔎실시간 교통정보 http://topis.seoul.go.kr
+- id: HW-08
+  category_code: HW
+  disaster_type: 호우
+  level: 경보
+  state: 복합
+  display_name: 호우경보 복합
+  button_label: 홍수 복합
+  section: 호우 복합
+  trigger_condition: 호우경보 + 홍수경보 동시 발효
+  review_status: confirmed
+  review_label: 확정 · 변경금지
+  automation: true
+  enabled: true
+  menu_order: 9
+  aliases: []
+  required_slots:
+  - 하천지점
+  - 일자
+  optional_slots: []
+  text: |
+    📢서울 #호우경보, {하천지점} 지점 #홍수경보 발효 중({일자})
 
-      {#유지지역}{유지지역}은(는) 폭염주의보가 유지됩니다.
+    기록적 폭우로 밤사이 많은 비가 내렸습니다.
+    오늘도 비가 예보되어 있으므로 외출 자제,
+    재난문자 및 기상상황을 수시로 확인하시기 바랍니다.
 
-      {/유지지역}한낮 야외활동을 자제하고,
-      충분한 수분 섭취와 적정 실내 냉방온도 유지 등
-      건강관리에 각별히 유의해 주세요.
+    ※ 상습침수 및 산사태 취약지역 주민들은 유사 시 안전한 곳으로 대피(🚨긴급상황 신고 119)
 
-      📲 실시간 속보·무더위쉼터 정보
-      👉 safecity.seoul.go.kr
+    📲 실시간 속보·행동요령
+    👉 http://safecity.seoul.go.kr
+- id: HW-09
+  category_code: HW
+  disaster_type: 호우
+  level: 주의보/경보
+  state: 연계
+  display_name: 호우특보 연계
+  button_label: 태풍 연계
+  section: 호우 연계
+  trigger_condition: 태풍 영향에 따른 호우특보
+  review_status: confirmed
+  review_label: 확정 · 변경금지
+  automation: true
+  enabled: true
+  menu_order: 10
+  aliases: []
+  required_slots:
+  - 발효일시
+  - 태풍명
+  optional_slots: []
+  text: |
+    🚨서울 #호우주의보({발효일시})🚨
 
-  - id: HEATWAVE_ADVISORY_ISSUED
-    display_name: "폭염주의보 발효"
-    button_label: "🔥 폭염주의보"
-    enabled: true
-    required_slots:
-      - 기준일시
-      - 지역
-    optional_slots: []
-    text: |
-      🚨 {기준일시} 기준,
-      {지역} 폭염주의보 발효
+    태풍 '{태풍명}'의 영향으로
+    내일까지 바람을 동반한 강한 비가 계속될 예정입니다.
+    하천변이나 상습침수구역 인근 접근 자제,
+    안전사고에 각별히 유의하시기 바랍니다.
 
-      서울시는 폭염 피해 예방을 위해
-      폭염 종합지원상황실을 가동하고
-      시민 보호와 취약시설 안전관리를 강화합니다.
+    산사태 취약지역 주민들은
+    재난문자 및 기상 상황을 수시로 확인해 주시고,
+    유사 시 안전한 곳으로 대피하시기 바랍니다.
+    (☎️긴급상황 발생 시 119 신고)
 
-      💥 한낮 야외활동은 자제하고
-      충분한 수분 섭취와 휴식으로
-      건강관리에 유의해 주세요.
+    📲 실시간 속보·행동요령
+    👉 http://safecity.seoul.go.kr
+- id: HT-01
+  category_code: HT
+  disaster_type: 폭염
+  level: 주의보
+  state: 발효
+  display_name: 폭염주의보 발효
+  button_label: 주의보 발효
+  section: 폭염 발효
+  trigger_condition: 서울 지역 폭염주의보 발효
+  review_status: confirmed
+  review_label: 확정 · 변경금지
+  automation: true
+  enabled: true
+  menu_order: 11
+  aliases:
+  - HEATWAVE_ADVISORY_ISSUED
+  required_slots:
+  - 기준일시
+  - 지역
+  optional_slots: []
+  text: |
+    🚨{기준일시} 기준,
+    {지역} 폭염주의보 발효
 
-      📲 실시간 속보·무더위쉼터 정보
-      👉 safecity.seoul.go.kr
+    한낮 야외 활동을 자제하고,
+    충분한 수분 섭취와 적정 실내 냉방온도 유지 등
+    건강관리에 각별히 유의해 주세요.
 
-  - id: TROPICAL_NIGHT_ADVISORY_ISSUED
-    display_name: "열대야주의보 발효"
-    button_label: "🌙 열대야"
-    enabled: true
-    required_slots:
-      - 발표일시
-      - 지역
-    optional_slots: []
-    text: |
-      🚨 {발표일시}부로 {지역} 열대야주의보 발효
+    📲 실시간 속보·무더위쉼터 정보
+    👉 http://safecity.seoul.go.kr
+- id: HT-02
+  category_code: HT
+  disaster_type: 폭염
+  level: 경보
+  state: 발효
+  display_name: 폭염경보 발효
+  button_label: 경보 발효
+  section: 폭염 발효
+  trigger_condition: 폭염경보 신규 발효 (직전 주의보 없음)
+  review_status: review_required
+  review_label: ★부서검수 필요
+  automation: true
+  enabled: true
+  menu_order: 12
+  aliases: []
+  required_slots:
+  - 기준일시
+  - 지역
+  optional_slots: []
+  text: |
+    🚨{기준일시} 기준,
+    {지역} 폭염경보 발효
 
-      오늘 밤에도 무더위가 이어질 전망입니다.
+    낮 12시~17시 야외 활동을 자제하고,
+    충분한 수분 섭취와 적정 실내 냉방온도 유지 등
+    건강관리에 각별히 유의해 주세요.
 
-      ✅ 에어컨·선풍기를 활용해 실내를 시원하게 유지하세요.
-      ✅ 잠들기 전 충분한 수분을 섭취하고, 카페인과 알코올은 피하세요.
-      ✅ 혼자 사는 어르신과 만성질환자의 안부를 확인해 주세요.
+    홀몸 어르신·야외근로자 등
+    폭염 취약계층의 안부를 살펴주세요.
 
-      ※ 열대야주의보는 폭염주의보 발효 지역 중에서 서울의 경우에는 밤 최저기온(18시~익일 09시)이 26℃ 이상인 경우에 발효됩니다.
+    📲 실시간 속보·무더위쉼터 정보
+    👉 http://safecity.seoul.go.kr
+- id: HT-03
+  category_code: HT
+  disaster_type: 폭염
+  level: 경보
+  state: 상향
+  display_name: 폭염경보 상향
+  button_label: 경보 상향
+  section: 폭염 상향
+  trigger_condition: 직전 상태가 폭염주의보 → 경보로 상향 (일부 권역 유지 가능)
+  review_status: confirmed
+  review_label: 확정 · 변경금지
+  automation: true
+  enabled: true
+  menu_order: 13
+  aliases:
+  - HEATWAVE_UPGRADED
+  required_slots:
+  - 발효일시
+  - 권역수
+  - 상향권역
+  - 유지권역
+  optional_slots: []
+  text: |
+    🚨{발효일시} 부로,
+    서울 {권역수}개 권역({상향권역})이
+    폭염주의보에서 폭염경보로 상향되었습니다.
+    *{유지권역}은 폭염주의보 유지 중
 
-      📲 실시간 속보·폭염 행동요령
-      👉 safecity.seoul.go.kr
+    한낮 야외 활동을 자제하고,
+    충분한 수분 섭취와 적정 실내 냉방온도 유지 등
+    건강관리에 각별히 유의해 주세요.
 
-  - id: ORIGINAL_ONLY
-    display_name: "원문 그대로"
-    button_label: "📄 원문"
-    enabled: true
-    required_slots:
-      - 원문
-    optional_slots: []
-    text: |
-      {원문}
+    📲 실시간 속보·무더위쉼터 정보
+    👉 http://safecity.seoul.go.kr
+- id: HT-04
+  category_code: HT
+  disaster_type: 폭염
+  level: 주의보
+  state: 하향
+  display_name: 폭염주의보 하향
+  button_label: 주의보 하향
+  section: 폭염 하향
+  trigger_condition: 직전 상태가 폭염경보 → 주의보로 하향
+  review_status: review_required
+  review_label: ★부서검수 필요
+  automation: true
+  enabled: true
+  menu_order: 14
+  aliases: []
+  required_slots:
+  - 발효일시
+  - 지역
+  optional_slots: []
+  text: |
+    🚨{발효일시} 부로,
+    {지역}이(가)
+    폭염경보에서 폭염주의보로 하향되었습니다.
 
-  - id: UNKNOWN
-    display_name: "권장 템플릿 없음"
-    button_label: ""
-    enabled: false
-    required_slots: []
-    optional_slots: []
-    text: ""
+    더위가 완전히 물러난 것은 아니니,
+    한낮 야외 활동 자제와 충분한 수분 섭취로
+    건강관리에 계속 유의해 주세요.
+
+    📲 실시간 속보·무더위쉼터 정보
+    👉 http://safecity.seoul.go.kr
+- id: HT-05
+  category_code: HT
+  disaster_type: 폭염
+  level: '-'
+  state: 해제
+  display_name: 폭염특보 해제
+  button_label: 특보 해제
+  section: 폭염 해제
+  trigger_condition: 폭염특보 전면 해제
+  review_status: review_required
+  review_label: ★부서검수 필요
+  automation: true
+  enabled: true
+  menu_order: 15
+  aliases: []
+  required_slots:
+  - 지역
+  - 해제일시
+  optional_slots: []
+  text: |
+    📢 [안내]
+
+    {지역}에 발효되었던
+    폭염특보는 {해제일시}부로 해제되었습니다.
+
+    다만 낮 기온이 여전히 높으니
+    건강관리에 유의해 주세요.
+- id: TN-01
+  category_code: TN
+  disaster_type: 열대야
+  level: 주의보
+  state: 발효
+  display_name: 열대야주의보 발효
+  button_label: 주의보 발효
+  section: 열대야 발효
+  trigger_condition: 서울 지역 열대야주의보 발효
+  review_status: confirmed
+  review_label: 확정 · 변경금지
+  automation: true
+  enabled: true
+  menu_order: 16
+  aliases:
+  - TROPICAL_NIGHT_ADVISORY_ISSUED
+  required_slots:
+  - 발효일시
+  - 지역
+  optional_slots: []
+  text: |
+    🚨 {발효일시}부로 {지역} 열대야주의보 발효
+
+    오늘 밤에도 무더위가 이어질 전망입니다.
+
+    ✅ 에어컨·선풍기를 활용해 실내를 시원하게 유지하세요.
+    ✅ 잠들기 전 충분한 수분을 섭취하고, 카페인과 알코올은 피하세요.
+    ✅ 혼자 사는 어르신과 만성질환자의 안부를 확인해 주세요.
+
+    ※ 열대야주의보는 폭염주의보 발효 지역 중에서 서울의 경우에는 밤 최저기온(18시~익일 09시)이 26℃ 이상인 경우에 발효됩니다.
+
+    📲 실시간 속보·폭염 행동요령
+    👉 http://safecity.seoul.go.kr
+- id: TN-02
+  category_code: TN
+  disaster_type: 열대야
+  level: '-'
+  state: 해제
+  display_name: 열대야특보 해제
+  button_label: 주의보 해제
+  section: 열대야 해제
+  trigger_condition: 열대야주의보 해제
+  review_status: review_required
+  review_label: ★부서검수 필요
+  automation: true
+  enabled: true
+  menu_order: 17
+  aliases: []
+  required_slots:
+  - 지역
+  - 해제일시
+  optional_slots: []
+  text: |
+    📢 [안내]
+
+    {지역}에 발효되었던
+    열대야주의보는 {해제일시}부로 해제되었습니다.
+- id: FL-01
+  category_code: FL
+  disaster_type: 홍수
+  level: 주의보
+  state: 발효
+  display_name: 홍수주의보 발효
+  button_label: 주의보 발효
+  section: 홍수 발효
+  trigger_condition: 서울 관할 하천 홍수주의보 발효
+  review_status: confirmed
+  review_label: 확정 · 변경금지
+  automation: true
+  enabled: true
+  menu_order: 18
+  aliases:
+  - FLOOD_ADVISORY_ISSUED
+  required_slots:
+  - 기준일시
+  - 하천지점
+  optional_slots: []
+  text: |
+    📢 홍수주의보 발효 안내
+    ({기준일시} 기준)
+
+    ☔ 홍수주의보
+    {하천지점}
+
+    하천 수위가 상승하고 있습니다.
+
+    하천변과 산책로,
+    저지대 출입을 자제하시고
+    안전한 곳으로 이동해 주세요.
+
+    📌 실시간 재난예보·행동요령
+    서울안전누리
+    👉 http://safecity.seoul.go.kr
+- id: FL-02
+  category_code: FL
+  disaster_type: 홍수
+  level: 경보
+  state: 발효
+  display_name: 홍수경보 발효
+  button_label: 경보 발효
+  section: 홍수 발효
+  trigger_condition: 서울 관할 하천 홍수경보 발령
+  review_status: review_required
+  review_label: ★부서검수 필요
+  automation: true
+  enabled: true
+  menu_order: 19
+  aliases: []
+  required_slots:
+  - 기준일시
+  - 하천지점
+  optional_slots: []
+  text: |
+    📢 홍수경보 발령 안내
+    ({기준일시} 기준)
+
+    ☔ 홍수경보
+    {하천지점}
+
+    하천 수위가 급격히 상승하고 있습니다.
+
+    하천변·둔치 주차장에서 즉시 대피하시고,
+    주차 차량은 안전한 곳으로 이동해 주세요.
+    (🚨긴급상황 신고 119)
+
+    📌 실시간 재난예보·행동요령
+    서울안전누리
+    👉 http://safecity.seoul.go.kr
+- id: FL-03
+  category_code: FL
+  disaster_type: 홍수
+  level: '-'
+  state: 해제
+  display_name: 홍수특보 해제
+  button_label: 특보 해제
+  section: 홍수 해제
+  trigger_condition: 홍수특보 해제
+  review_status: review_required
+  review_label: ★부서검수 필요
+  automation: true
+  enabled: true
+  menu_order: 20
+  aliases: []
+  required_slots:
+  - 하천지점
+  - 해제일시
+  optional_slots: []
+  text: |
+    📢 [안내]
+
+    {하천지점}에 발효되었던
+    홍수특보는 {해제일시}부로 해제되었습니다.
+
+    다만 하천 수위가 안정될 때까지
+    하천변 접근에 유의해 주세요.
+- id: REF-01
+  category_code: REF
+  disaster_type: 태풍
+  level: '-'
+  state: 안내
+  display_name: 태풍 안내
+  button_label: 안내
+  section: 태풍 안내
+  trigger_condition: 태풍 북상 사전 안내 (자동화 범위 외 · 수동)
+  review_status: reference
+  review_label: 참고 · 수동게시
+  automation: false
+  enabled: false
+  menu_order: 21
+  aliases: []
+  required_slots:
+  - 일자1
+  - 일자2
+  - 태풍명
+  - 강수량
+  optional_slots: []
+  text: |
+    🚨오늘({일자1})과 내일({일자2}) 사이 태풍 {태풍명}의 영향으로
+    수도권에 최대 {강수량}mm의 비가 내리고, 강한 바람이 불 예정입니다.
+
+    출입문과 창문 등은 닫고 단단히 고정해 주시고,
+    가급적 외출 자제, 기상정보 및 재난문자를 수시로 확인해 주시기 바랍니다.
+
+    📲 실시간 속보·행동요령 http://safecity.seoul.go.kr
+- id: REF-02
+  category_code: REF
+  disaster_type: 강풍
+  level: 주의보
+  state: 발효
+  display_name: 강풍주의보 발효
+  button_label: 주의보 발효
+  section: 강풍 발효
+  trigger_condition: 강풍주의보 발효 (자동화 범위 외 · 수동)
+  review_status: reference
+  review_label: 참고 · 수동게시
+  automation: false
+  enabled: false
+  menu_order: 22
+  aliases: []
+  required_slots:
+  - 발효일시
+  - 동시해제특보
+  optional_slots: []
+  text: |
+    🚨서울 강풍주의보 발령 ({발효일시} 발효)
+    ※ {동시해제특보} 해제
+
+    오늘 밤부터 내일까지
+    서울에 강한 바람과 많은 비가 예상됩니다.
+    돌풍 및 침수 피해에 대비해 주세요.
+
+    ▪️ 가급적 외출 자제
+    ▪️ 간판·화분 등 낙하 위험물 고정
+    ▪️ 빗물받이 덮개 제거
+    ▪️ 하천·등산로·공사장 등 위험지역 방문 자제
+    ▪️ 기상 상황 수시 확인
+
+    📢 실시간 속보·행동요령
+    safecity.seoul.go.kr
+system_templates:
+- id: ORIGINAL_ONLY
+  display_name: 원문 그대로
+  button_label: 📄 원문
+  enabled: true
+  automation: false
+  review_status: confirmed
+  review_label: system
+  aliases: []
+  required_slots:
+  - 원문
+  optional_slots: []
+  text: |
+    {원문}
+- id: UNKNOWN
+  display_name: 권장 템플릿 없음
+  button_label: ''
+  enabled: false
+  automation: false
+  review_status: confirmed
+  review_label: system
+  aliases: []
+  required_slots: []
+  optional_slots: []
+  text: |2+
+
+legacy_templates:
+- id: HEAVY_RAIN_MULTI_LEVEL_ISSUED
+  display_name: 호우특보 발효 안내
+  button_label: ☔ 호우 복합
+  enabled: false
+  automation: false
+  legacy: true
+  hidden: true
+  review_status: confirmed
+  review_label: legacy — no exact Excel alias (HW-08 differs)
+  aliases: []
+  required_slots:
+  - 지역
+  - 기준시각
+  optional_slots:
+  - 경보지역
+  - 주의보지역
+  - 홍수지역
+  text: |
+    📢 {지역} 호우특보 발효 안내
+    ({기준시각} 기준)
+
+    {#경보지역}☔ 호우경보
+    {경보지역}
+
+    {/경보지역}{#주의보지역}☔ 호우주의보
+    {주의보지역}
+
+    {/주의보지역}{#홍수지역}☔ 홍수주의보
+    {홍수지역}
+
+    {/홍수지역}하천 수위 상승과 저지대·지하공간 침수가 우려됩니다.
+
+    하천변·산책로·둔치·공사장 등
+    위험지역 출입을 자제하고,
+    대피 권고 시 즉시 안전한 곳으로 이동해 주세요.
+
+    📌 실시간 재난예보·행동요령
+    서울안전누리
+    👉 safecity.seoul.go.kr

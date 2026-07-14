@@ -181,8 +181,10 @@ def test_latest_includes_selection_buttons_with_matching_callback_data(
     callback_data = [b["callback_data"] for row in keyboard["inline_keyboard"] for b in row]
 
     assert "📄 원문" in labels
-    parsed = [parse_callback_data(cd) for cd in callback_data]
-    assert all(p is not None and p[0] == internal_id for p in parsed)
+    assert {"☔ 호우", "🔥 폭염", "🌙 열대야", "🌊 홍수"} <= set(labels)
+    for cd in callback_data:
+        assert cd.startswith(("cat:", "tpl:"))
+        assert int(cd.split(":")[1]) == internal_id
 
 
 def test_no_legacy_latest_renderer_remains():

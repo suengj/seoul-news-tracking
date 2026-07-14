@@ -20,7 +20,11 @@ import httpx
 
 from app.config import Settings
 from app.models import DisasterMessageRecord, TelegramStatus
-from app.template_renderer import load_templates
+from app.template_renderer import (
+    automation_templates,
+    get_template,
+    resolve_template_id,
+)
 from app.template_rules import TemplateSuggestion
 
 logger = logging.getLogger(__name__)
@@ -336,35 +340,27 @@ class TelegramSender:
 # reads/writes, calling the extractor/renderer/AI client) lives in
 # app/template_flow.py.
 
-# Compact callback_data codes ("tpl:{message_id}:{code}"), well under
-# Telegram's 64-byte callback_data limit.
-TEMPLATE_SHORT_CODES: dict[str, str] = {
-    "FLOOD_ADVISORY_ISSUED": "flood_adv",
-    "HEAVY_RAIN_CLEARED": "rain_clr",
-    "HEAVY_RAIN_DOWNGRADED": "rain_down",
-    "HEAVY_RAIN_MULTI_LEVEL_ISSUED": "rain_multi",
-    "HEATWAVE_UPGRADED": "heat_up",
-    "HEATWAVE_ADVISORY_ISSUED": "heat_adv",
-    "TROPICAL_NIGHT_ADVISORY_ISSUED": "trop_night",
-    "ORIGINAL_ONLY": "orig",
-}
-_SHORT_CODE_TO_TEMPLATE_ID = {code: tid for tid, code in TEMPLATE_SHORT_CODES.items()}
+# Compact two-stage selection callbacks (category -> template).
+# Forms stay well under Telegram's 64-byte callback_data limit:
+#   cat:{message_id}:{HW|HT|TN|FL}
+#   tpl:{message_id}:{template_id}
+#   back:{message_id}
+#   preview:{preview_id}:{confirm|cancel|ai}
 
-# Section 5's exact 4-row, 8-button layout — every button is equal weight,
-# there is no "recommended" primary button.
-_SELECTION_BUTTON_ROWS: list[list[str]] = [
-    ["FLOOD_ADVISORY_ISSUED", "HEAVY_RAIN_CLEARED"],
-    ["HEAVY_RAIN_DOWNGRADED", "HEAVY_RAIN_MULTI_LEVEL_ISSUED"],
-    ["HEATWAVE_UPGRADED", "HEATWAVE_ADVISORY_ISSUED"],
-    ["TROPICAL_NIGHT_ADVISORY_ISSUED", "ORIGINAL_ONLY"],
-]
+CATEGORY_META: dict[str, dict[str, str]] = {
+    "HW": {"emoji": "☔", "label": "호우"},
+    "HT": {"emoji": "🔥", "label": "폭염"},
+    "TN": {"emoji": "🌙", "label": "열대야"},
+    "FL": {"emoji": "🌊", "label": "홍수"},
+}
+CATEGORY_ORDER = ("HW", "HT", "TN", "FL")
 
 _EXTRACTION_METHOD_LABELS = {"rule": "Rule", "ai": "AI"}
 
 
 def make_callback_data(message_id: int, template_id: str) -> str:
-    code = TEMPLATE_SHORT_CODES[template_id]
-    return f"tpl:{message_id}:{code}"
+    canonical = resolve_template_id(template_id)
+    return f"tpl:{message_id}:{canonical}"
 
 
 def parse_callback_data(data: str) -> tuple[int, str] | None:
@@ -376,10 +372,41 @@ def parse_callback_data(data: str) -> tuple[int, str] | None:
         message_id = int(parts[1])
     except ValueError:
         return None
-    template_id = _SHORT_CODE_TO_TEMPLATE_ID.get(parts[2])
-    if template_id is None:
+    template_id = parts[2]
+    if get_template(template_id) is None:
         return None
-    return message_id, template_id
+    return message_id, resolve_template_id(template_id)
+
+
+def make_category_callback_data(message_id: int, category_code: str) -> str:
+    return f"cat:{message_id}:{category_code}"
+
+
+def parse_category_callback_data(data: str) -> tuple[int, str] | None:
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "cat":
+        return None
+    try:
+        message_id = int(parts[1])
+    except ValueError:
+        return None
+    if parts[2] not in CATEGORY_META:
+        return None
+    return message_id, parts[2]
+
+
+def make_back_callback_data(message_id: int) -> str:
+    return f"back:{message_id}"
+
+
+def parse_back_callback_data(data: str) -> int | None:
+    parts = data.split(":")
+    if len(parts) != 2 or parts[0] != "back":
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
 
 
 def make_preview_callback_data(preview_id: int, action: str) -> str:
@@ -400,23 +427,67 @@ def parse_preview_callback_data(data: str) -> tuple[int, str] | None:
     return preview_id, parts[2]
 
 
+def _chunk_buttons(buttons: list[dict], per_row: int = 2) -> list[list[dict]]:
+    return [buttons[i : i + per_row] for i in range(0, len(buttons), per_row)]
+
+
 def build_selection_keyboard(message_id: int) -> dict:
-    """The 7-template + 원문 selection keyboard. `enabled: false` templates
-    (config/message_templates.yaml) are omitted, never just disabled-looking."""
-    templates = load_templates()
-    rows: list[list[dict]] = []
-    for template_ids in _SELECTION_BUTTON_ROWS:
-        row = [
+    """Stage-1 keyboard: disaster categories + original-message button."""
+    present = {t.category_code for t in automation_templates()}
+    cat_buttons: list[dict] = []
+    for code in CATEGORY_ORDER:
+        if code not in present:
+            continue
+        meta = CATEGORY_META[code]
+        cat_buttons.append(
             {
-                "text": templates[tid].button_label,
-                "callback_data": make_callback_data(message_id, tid),
+                "text": f"{meta['emoji']} {meta['label']}",
+                "callback_data": make_category_callback_data(message_id, code),
             }
-            for tid in template_ids
-            if templates[tid].enabled
-        ]
-        if row:
-            rows.append(row)
+        )
+    rows = _chunk_buttons(cat_buttons, per_row=2)
+    original = get_template("ORIGINAL_ONLY")
+    if original is not None and original.enabled:
+        rows.append(
+            [
+                {
+                    "text": original.button_label or "📄 원문",
+                    "callback_data": make_callback_data(message_id, "ORIGINAL_ONLY"),
+                }
+            ]
+        )
     return {"inline_keyboard": rows}
+
+
+def build_category_keyboard(message_id: int, category_code: str) -> dict:
+    """Stage-2 keyboard: enabled automation templates in one category."""
+    templates = automation_templates(category_code=category_code)
+    buttons = [
+        {
+            "text": t.button_label or t.display_name,
+            "callback_data": make_callback_data(message_id, t.id),
+        }
+        for t in templates
+    ]
+    rows = _chunk_buttons(buttons, per_row=2)
+    nav: list[dict] = [
+        {"text": "← 뒤로", "callback_data": make_back_callback_data(message_id)}
+    ]
+    original = get_template("ORIGINAL_ONLY")
+    if original is not None and original.enabled:
+        nav.append(
+            {
+                "text": original.button_label or "📄 원문",
+                "callback_data": make_callback_data(message_id, "ORIGINAL_ONLY"),
+            }
+        )
+    rows.append(nav)
+    return {"inline_keyboard": rows}
+
+
+def build_category_select_message(category_code: str) -> str:
+    meta = CATEGORY_META.get(category_code, {"emoji": "", "label": category_code})
+    return f"{meta['emoji']} {meta['label']} 템플릿을 선택해 주세요."
 
 
 def build_template_alert_message(
@@ -437,8 +508,8 @@ def build_template_alert_message(
         "사용할 템플릿을 선택해 주세요.",
     ]
     if recommended is not None:
-        templates = load_templates()
-        display_name = templates[recommended.template_id].display_name
+        template = get_template(recommended.template_id)
+        display_name = template.display_name if template is not None else recommended.template_id
         lines += ["", f"(실험적 추천: {display_name}, score={recommended.rule_score:.2f} — 참고용)"]
     return "\n".join(lines)
 
@@ -489,14 +560,18 @@ def _format_confirmed_slots(extracted_slots: dict) -> str:
 def build_preview_complete_message(
     template_id: str, extraction_method: str, extracted_slots: dict, rendered_text: str
 ) -> str:
-    templates = load_templates()
-    display_name = templates[template_id].display_name
+    template = get_template(template_id)
+    display_name = template.display_name if template is not None else template_id
     method_label = _EXTRACTION_METHOD_LABELS.get(extraction_method, extraction_method)
     lines = [
         "[템플릿 초안]",
         "",
         "선택 포맷:",
         display_name,
+    ]
+    if template is not None and template.review_status == "review_required":
+        lines += ["", "⚠️ 부서 검수 필요"]
+    lines += [
         "",
         "추출 방식:",
         method_label,
@@ -508,20 +583,24 @@ def build_preview_complete_message(
         "",
         rendered_text,
     ]
-    return "\n".join(lines)
+    return '\n'.join(lines)
 
 
 def build_preview_incomplete_message(
     template_id: str, extracted_slots: dict, missing_slots: list[str], original_body: str
 ) -> str:
-    templates = load_templates()
-    display_name = templates[template_id].display_name if template_id in templates else template_id
+    template = get_template(template_id)
+    display_name = template.display_name if template is not None else template_id
     missing_text = ", ".join(missing_slots) if missing_slots else "(없음)"
     lines = [
         "[템플릿 작성 미완료]",
         "",
         "선택 포맷:",
         display_name,
+    ]
+    if template is not None and template.review_status == "review_required":
+        lines += ["", "⚠️ 부서 검수 필요"]
+    lines += [
         "",
         "확인된 값:",
         _format_confirmed_slots(extracted_slots),
@@ -532,12 +611,12 @@ def build_preview_incomplete_message(
         "원문:",
         original_body,
     ]
-    return "\n".join(lines)
+    return '\n'.join(lines)
 
 
 def build_confirmation_message(template_id: str, final_rendered_text: str) -> str:
-    templates = load_templates()
-    display_name = templates[template_id].display_name if template_id in templates else template_id
+    template = get_template(template_id)
+    display_name = template.display_name if template is not None else template_id
     lines = [
         "[최종 확정 완료]",
         "",

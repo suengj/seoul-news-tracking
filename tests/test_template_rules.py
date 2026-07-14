@@ -24,20 +24,20 @@ def test_suggest_templates_sorted_by_score_descending():
 def test_flood_advisory_scores_high_when_signals_present():
     text = "금일 05:30 공주시 홍수주의보 발령. 안전에 유의하세요."
     suggestions = {s.template_id: s for s in suggest_templates(text, "공주시", NOW)}
-    assert suggestions["FLOOD_ADVISORY_ISSUED"].rule_score == 1.0
-    assert not suggestions["FLOOD_ADVISORY_ISSUED"].conflict_signals
+    assert suggestions["FL-01"].rule_score == 1.0
+    assert not suggestions["FL-01"].conflict_signals
 
 
 def test_heavy_rain_cleared_detected():
     text = "오늘 15시 부로 관내에 발효 중이던 호우주의보가 해제되었습니다."
     suggestions = {s.template_id: s for s in suggest_templates(text, "예천군", NOW)}
-    assert suggestions["HEAVY_RAIN_CLEARED"].rule_score == 1.0
+    assert suggestions["HW-05"].rule_score == 1.0
 
 
 def test_heavy_rain_downgraded_detected():
     text = "호우경보가 호우주의보로 하향 변경되었습니다."
     suggestions = {s.template_id: s for s in suggest_templates(text, "과천시", NOW)}
-    assert suggestions["HEAVY_RAIN_DOWNGRADED"].rule_score == 1.0
+    assert suggestions["HW-04"].rule_score == 1.0
     # Not also flagged as a fresh multi-level issuance (하향 conflicts with it).
     assert suggestions["HEAVY_RAIN_MULTI_LEVEL_ISSUED"].conflict_signals
 
@@ -54,7 +54,7 @@ def test_heatwave_upgraded_detected():
     # transition word, so a genuine advisory-to-warning upgrade is required.
     text = "폭염주의보에서 폭염경보로 상향 변경되었습니다."
     suggestions = {s.template_id: s for s in suggest_templates(text, "안양시", NOW)}
-    assert suggestions["HEATWAVE_UPGRADED"].rule_score == 1.0
+    assert suggestions["HT-03"].rule_score == 1.0
 
 
 def test_heatwave_upgraded_requires_advisory_not_just_warning():
@@ -63,19 +63,19 @@ def test_heatwave_upgraded_requires_advisory_not_just_warning():
     # a transition word, which could false-positive on a plain warning.
     text = "폭염경보로 상향 변경되었습니다."
     suggestions = {s.template_id: s for s in suggest_templates(text, "안양시", NOW)}
-    assert suggestions["HEATWAVE_UPGRADED"].rule_score < 1.0
+    assert suggestions["HT-03"].rule_score < 1.0
 
 
 def test_heatwave_advisory_issued_detected_and_excludes_upgrade_wording():
     text = "폭염주의보 발효 중. 건강관리에 유의하세요."
     suggestions = {s.template_id: s for s in suggest_templates(text, "곡성군", NOW)}
-    assert suggestions["HEATWAVE_ADVISORY_ISSUED"].rule_score == 1.0
-    assert not suggestions["HEATWAVE_ADVISORY_ISSUED"].conflict_signals
+    assert suggestions["HT-01"].rule_score == 1.0
+    assert not suggestions["HT-01"].conflict_signals
 
     # Same wording plus 폭염경보 must conflict (it's an upgrade, not a plain advisory).
     text_with_warning = "폭염주의보 발효 중이며 일부 지역 폭염경보 발령."
     suggestions2 = {s.template_id: s for s in suggest_templates(text_with_warning, "곡성군", NOW)}
-    assert suggestions2["HEATWAVE_ADVISORY_ISSUED"].conflict_signals
+    assert suggestions2["HT-01"].conflict_signals
 
 
 def test_tropical_night_requires_explicit_advisory_phrase():
@@ -85,9 +85,9 @@ def test_tropical_night_requires_explicit_advisory_phrase():
     explicit_scores = {s.template_id: s.rule_score for s in suggest_templates(explicit, "연천군", NOW)}
     generic_scores = {s.template_id: s.rule_score for s in suggest_templates(generic, "경산시", NOW)}
 
-    assert explicit_scores["TROPICAL_NIGHT_ADVISORY_ISSUED"] == 1.0
+    assert explicit_scores["TN-01"] == 1.0
     # Generic 무더위/열대야 wording without the explicit "주의보" phrase must not match.
-    assert generic_scores["TROPICAL_NIGHT_ADVISORY_ISSUED"] == 0.0
+    assert generic_scores["TN-01"] == 0.0
 
 
 def test_recommend_template_never_picks_a_conflicted_candidate():
@@ -96,21 +96,21 @@ def test_recommend_template_never_picks_a_conflicted_candidate():
     # never be the recommendation even though its raw score is high.
     text = "호우경보가 호우주의보로 하향 변경되었으며 해제되었습니다."
     recommended, _ = recommend_template(text, "과천시", NOW, threshold=0.5)
-    assert recommended is None or recommended.template_id != "HEAVY_RAIN_DOWNGRADED"
+    assert recommended is None or recommended.template_id != "HW-04"
 
 
 def test_recommend_template_below_threshold_is_unknown():
     text = "폭염경보 발령. 야외활동 자제."
     recommended, candidates = recommend_template(text, "담양군", NOW, threshold=0.85)
     assert recommended is None
-    assert any(c.template_id == "HEATWAVE_ADVISORY_ISSUED" for c in candidates)
+    assert any(c.template_id == "HT-01" for c in candidates)
 
 
 def test_recommend_template_requires_extractable_slots():
     # High score but river name can't be found -> must fall back to None (UNKNOWN).
     text = "금일 05:30 공주시 홍수주의보 발령, 대피 바랍니다."
     recommended, candidates = recommend_template(text, "", NOW, threshold=0.85)
-    top = next(c for c in candidates if c.template_id == "FLOOD_ADVISORY_ISSUED")
+    top = next(c for c in candidates if c.template_id == "FL-01")
     assert top.rule_score == 1.0
     assert recommended is None
 
@@ -119,4 +119,4 @@ def test_recommend_template_succeeds_when_slots_extractable():
     text = "오늘 15시 부로 관내에 발효 중이던 호우주의보가 해제되었습니다."
     recommended, _ = recommend_template(text, "예천군", NOW, threshold=0.85)
     assert recommended is not None
-    assert recommended.template_id == "HEAVY_RAIN_CLEARED"
+    assert recommended.template_id == "HW-05"

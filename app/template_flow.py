@@ -38,6 +38,8 @@ from app.telegram_sender import (
     TelegramSender,
     TelegramSendOutcome,
     build_cancel_message,
+    build_category_keyboard,
+    build_category_select_message,
     build_confirm_failed_message,
     build_confirmation_message,
     build_confirmed_preview_keyboard,
@@ -48,7 +50,9 @@ from app.telegram_sender import (
     build_stale_preview_message,
     build_template_alert_message,
     build_unavailable_request_message,
+    parse_back_callback_data,
     parse_callback_data,
+    parse_category_callback_data,
     parse_preview_callback_data,
 )
 from app.template_extractors import SlotValue, extract_slots
@@ -268,6 +272,55 @@ def dispatch_callback(
         return
 
     data = callback_query.get("data") or ""
+
+    cat_parsed = parse_category_callback_data(data)
+    if cat_parsed is not None:
+        message_id, category_code = cat_parsed
+        if callback_query_id:
+            db.mark_callback_processed(callback_query_id)
+        try:
+            sender.send_plain_text(
+                build_category_select_message(category_code),
+                chat_id=interaction_chat_id,
+                reply_markup=build_category_keyboard(message_id, category_code),
+                enforce_send_enabled=False,
+            )
+            logger.info(
+                "callback_query_id=%s user_id=%s chat_id=%s action=category_select "
+                "category=%s routed_chat_id=%s outcome=handled",
+                callback_query_id,
+                user_id,
+                interaction_chat_id,
+                category_code,
+                interaction_chat_id,
+            )
+        except Exception:
+            logger.exception("category selection failed for message_id=%s", message_id)
+        return
+
+    back_parsed = parse_back_callback_data(data)
+    if back_parsed is not None:
+        message_id = back_parsed
+        if callback_query_id:
+            db.mark_callback_processed(callback_query_id)
+        try:
+            sender.send_plain_text(
+                "사용할 템플릿을 선택해 주세요.",
+                chat_id=interaction_chat_id,
+                reply_markup=build_selection_keyboard(message_id),
+                enforce_send_enabled=False,
+            )
+            logger.info(
+                "callback_query_id=%s user_id=%s chat_id=%s action=back "
+                "routed_chat_id=%s outcome=handled",
+                callback_query_id,
+                user_id,
+                interaction_chat_id,
+                interaction_chat_id,
+            )
+        except Exception:
+            logger.exception("back navigation failed for message_id=%s", message_id)
+        return
 
     tpl_parsed = parse_callback_data(data)
     if tpl_parsed is not None:

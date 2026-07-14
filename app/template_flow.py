@@ -20,6 +20,7 @@ from app.database import Database
 from app.models import DisasterMessageRecord, TelegramStatus
 from app.telegram_sender import (
     TelegramSender,
+    TelegramSendOutcome,
     build_cancel_message,
     build_confirm_failed_message,
     build_confirmation_message,
@@ -87,6 +88,60 @@ def build_initial_alert(
     text = build_template_alert_message(record, recommended)
     keyboard = build_selection_keyboard(record.internal_id)
     return text, keyboard, recommended, candidates
+
+
+NO_MESSAGES_REPLY = "아직 저장된 재난문자가 없습니다."
+
+
+def send_initial_alert(
+    sender: TelegramSender, db: Database, settings: Settings, record: DisasterMessageRecord
+) -> TelegramSendOutcome:
+    """Build and send the Service v1 initial alert, then persist the rule
+    engine's (informational-only) suggestion.
+
+    This is the single rendering path for a disaster-message alert: it is
+    used both for a genuinely new SafeCity record (`app.commands.poll_once`)
+    and for `/latest`/ordinary-text requests re-displaying the latest one
+    (`app.telegram_bot.send_latest_alert`), so the two are always
+    byte-for-byte identical — original text, selection buttons, and
+    callback data alike.
+
+    The Telegram send happens first and its outcome is always returned
+    as-is: a failure to persist `template_suggestions` afterward must never
+    look like a failed send, or the record's `telegram_status` would be
+    wrongly reverted from a real success and risk a duplicate delivery on
+    the next retry pass.
+    """
+    text, keyboard, recommended, candidates = build_initial_alert(record, settings)
+    outcome = sender.send_plain_text(text, reply_markup=keyboard)
+
+    try:
+        db.insert_template_suggestion(
+            message_id=record.internal_id,
+            recommended_template_id=recommended.template_id if recommended else None,
+            rule_score=recommended.rule_score if recommended else None,
+            candidates_json=json.dumps([vars(c) for c in candidates], ensure_ascii=False),
+            extraction_json="{}",
+            rendered_text=None,
+        )
+    except Exception:
+        logger.exception(
+            "failed to store template_suggestion for message_id=%s (send already completed)",
+            record.internal_id,
+        )
+
+    return outcome
+
+
+def send_latest_alert(db: Database, settings: Settings, sender: TelegramSender) -> TelegramSendOutcome:
+    """Used by `/latest` and ordinary-text handling in `app.telegram_bot` —
+    re-renders the most recently collected message through exactly
+    `send_initial_alert` above, the same path a newly detected message
+    uses, instead of a separate summary-only renderer."""
+    record = db.get_latest_record()
+    if record is None:
+        return sender.send_plain_text(NO_MESSAGES_REPLY)
+    return send_initial_alert(sender, db, settings, record)
 
 
 def _authorized(settings: Settings, user_id: int | None) -> bool:

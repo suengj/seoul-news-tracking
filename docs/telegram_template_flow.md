@@ -14,6 +14,24 @@ long-poll (`app/telegram_bot.py::TelegramBotRunner`) that handles **both**:
   plain text (same as `/latest`)
 - `callback_query` updates: routed to `app.template_flow.dispatch_callback`
 
+### `/latest` and ordinary text use the same renderer as a new message
+
+`/latest` and plain-text messages both call
+`app.template_flow.send_latest_alert`, which looks up the most recently
+collected record and renders it through `send_initial_alert` — the exact
+same function `poll_once` uses for a genuinely new SafeCity message (see
+"Sending: `poll_once` -> initial alert" below). There is only one rendering
+path for a disaster-message alert: the original text, the 8 selection
+buttons, and the secondary "실험적 추천" hint are always byte-for-byte
+identical regardless of what triggered the send, and a button press on a
+`/latest`-triggered message routes through `dispatch_callback` exactly like
+one on a poller-triggered message (same `tpl:{message_id}:{short_code}`
+callback data, since `message_id` is the real `messages.internal_id`
+either way). This replaced an older, separate `build_latest_reply` summary
+renderer (MarkdownV2 text only, no buttons) — that renderer no longer
+exists. If the database is empty, `/latest`/plain text instead sends
+"아직 저장된 재난문자가 없습니다." with no keyboard.
+
 There is deliberately no second `getUpdates` consumer — Telegram itself
 would reject a concurrent one for the same bot token with HTTP 409, and a
 local file lock (`app/process_lock.py`) refuses to start a second instance
@@ -24,7 +42,13 @@ runtime.
 ## Sending: `poll_once` -> initial alert
 
 For every genuinely new record, `app/commands/poll_once.py` calls
-`app.template_flow.build_initial_alert`, which:
+`app.template_flow.send_initial_alert` (which itself calls
+`build_initial_alert` below to get the text/keyboard, sends it, then
+persists the rule engine's suggestion). `send_latest_alert` — used by
+`/latest` and ordinary text, see above — calls the exact same
+`send_initial_alert` for the most recently collected record, so both
+paths share one implementation with no duplicated rendering code.
+`build_initial_alert` itself:
 
 1. runs `recommend_template` (informational only — see `docs/service_v1.md`)
    inside its own `try/except`, so a rule-engine crash can never block the

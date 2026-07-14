@@ -38,13 +38,12 @@ from app.telegram_sender import (
     escape_markdown_v2,
     format_timestamp,
 )
-from app.template_flow import dispatch_callback
+from app.template_flow import dispatch_callback, send_latest_alert
 
 __all__ = [
     "SingleInstanceLock",
     "TelegramBotRunner",
     "TelegramPollError",
-    "build_latest_reply",
     "build_status_reply",
 ]
 
@@ -66,7 +65,6 @@ HELP_TEXT = escape_markdown_v2(
     "/help - 도움말\n"
     "일반 텍스트 메시지를 보내도 /latest와 동일하게 동작합니다."
 )
-NO_MESSAGES_REPLY = escape_markdown_v2("아직 저장된 재난문자가 없습니다.")
 SHUTDOWN_DISABLED_REPLY = escape_markdown_v2(
     "개발용 종료 명령이 비활성화되어 있습니다 (LOCAL_SHUTDOWN_COMMAND_ENABLED=false)."
 )
@@ -136,43 +134,6 @@ def build_status_reply(db: Database, settings: Settings, *, now: datetime | None
         )
     )
 
-    return "\n".join(lines)
-
-
-def build_latest_reply(db: Database, settings: Settings, *, now: datetime | None = None) -> str:
-    now = now or datetime.now(tz=SEOUL_TZ)
-    record = db.get_latest_record()
-    if record is None:
-        return NO_MESSAGES_REPLY
-
-    state = db.get_system_state()
-    if state.last_successful_poll_at is not None:
-        elapsed_minutes = (now - state.last_successful_poll_at).total_seconds() / 60
-        if elapsed_minutes > settings.status_stale_after_minutes:
-            data_state = f"마지막 정상 수집 후 {elapsed_minutes:.0f}분 경과 (점검 필요)"
-        else:
-            data_state = f"최근 수집 정상 (마지막 정상 수집 {elapsed_minutes:.0f}분 전)"
-    else:
-        data_state = "수집 이력 없음"
-
-    lines = [
-        "\\[가장 최근 수집된 재난문자\\]",
-        "",
-        f"발송지역/기관: {escape_markdown_v2(record.sender_or_region)}",
-        f"발송시각: {escape_markdown_v2(format_timestamp(record.sent_at))}",
-        "",
-        "원문:",
-        escape_markdown_v2(record.original_body),
-        "",
-        "수집시각:",
-        escape_markdown_v2(format_timestamp(record.detected_at)),
-        "",
-        "데이터 상태:",
-        escape_markdown_v2(data_state),
-        "",
-        "출처:",
-        escape_markdown_v2(record.source_url),
-    ]
     return "\n".join(lines)
 
 
@@ -306,12 +267,14 @@ class TelegramBotRunner:
             return DispatchOutcome(handled=True, authorized=False, command=command)
 
         reply_text = self._handle_authorized(stripped, command, user_id)
-        self._reply(chat_id, message_id, reply_text)
+        if reply_text is not None:
+            self._reply(chat_id, message_id, reply_text)
         return DispatchOutcome(handled=True, authorized=True, command=command)
 
-    def _handle_authorized(self, stripped_text: str, command: str, user_id: int) -> str:
+    def _handle_authorized(self, stripped_text: str, command: str, user_id: int) -> str | None:
         if command == "/latest":
-            return build_latest_reply(self.db, self.settings)
+            self._send_latest_alert()
+            return None
         if command == "/status":
             return build_status_reply(self.db, self.settings)
         if command == "/pause":
@@ -322,8 +285,16 @@ class TelegramBotRunner:
             return HELP_TEXT
         if command == "/shutdown":
             return self._handle_shutdown(user_id)
-        # Ordinary text behaves the same as /latest.
-        return build_latest_reply(self.db, self.settings)
+        # Ordinary text behaves the same as /latest: the exact same
+        # rendering path a newly detected message uses (see
+        # `app.template_flow.send_initial_alert`), not a separate summary.
+        self._send_latest_alert()
+        return None
+
+    def _send_latest_alert(self) -> None:
+        outcome = send_latest_alert(self.db, self.settings, self.sender)
+        if outcome.status == TelegramStatus.TELEGRAM_FAILED:
+            logger.error("failed to send /latest alert: %s", outcome.error)
 
     def _handle_pause(self, user_id: int) -> str:
         changed = self.db.pause_polling(actor_user_id=user_id)

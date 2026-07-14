@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
+import app.telegram_bot as telegram_bot
 from app.database import Database
 from app.telegram_bot import TelegramBotRunner, TelegramPollError
-from app.telegram_sender import TelegramSender
+from app.telegram_sender import TelegramSender, parse_callback_data
+from app.template_flow import build_initial_alert
 
 
 @pytest.fixture
@@ -101,13 +105,89 @@ def test_ordinary_authorized_text_returns_latest_record(make_settings, db, make_
     assert "일반 텍스트로 조회되는 문자" in sent[0]["text"]
 
 
-def test_reply_threads_to_triggering_message(make_settings, db, make_record):
+def test_latest_reply_is_not_threaded_matching_new_message_alert(make_settings, db, make_record):
+    # /latest now renders through the exact same path as a newly detected
+    # message (`send_initial_alert`), which is never a threaded reply — see
+    # the parity tests below.
     settings = make_settings(telegram_allowed_user_ids=(111,))
     db.insert(make_record(source_id="R1"))
     sent = []
     bot = make_bot(settings, db, _record_handler(sent))
     bot.dispatch(_message_update(1, user_id=111, text="/latest", message_id=777))
-    assert sent[0]["reply_to_message_id"] == "777"
+    assert "reply_to_message_id" not in sent[0]
+
+
+# -- /latest and ordinary text must match the new-message rendering path -----
+
+
+def test_latest_rendering_matches_new_message_rendering(make_settings, db, make_record):
+    settings = make_settings(telegram_allowed_user_ids=(111,))
+    internal_id = db.insert(make_record(source_id="PARITY1", body="한강 수위 상승으로 대피 안내"))
+    stored = db.get_by_internal_id(internal_id)
+    expected_text, expected_keyboard, _, _ = build_initial_alert(stored, settings)
+
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+    bot.dispatch(_message_update(1, user_id=111, text="/latest"))
+
+    assert sent[0]["text"] == expected_text
+    assert json.loads(sent[0]["reply_markup"]) == expected_keyboard
+
+
+def test_ordinary_text_rendering_matches_new_message_rendering(make_settings, db, make_record):
+    settings = make_settings(telegram_allowed_user_ids=(111,))
+    internal_id = db.insert(make_record(source_id="PARITY2", body="폭염특보 발효 중"))
+    stored = db.get_by_internal_id(internal_id)
+    expected_text, expected_keyboard, _, _ = build_initial_alert(stored, settings)
+
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+    bot.dispatch(_message_update(1, user_id=111, text="아무 텍스트"))
+
+    assert sent[0]["text"] == expected_text
+    assert json.loads(sent[0]["reply_markup"]) == expected_keyboard
+
+
+def test_latest_and_ordinary_text_produce_identical_output(make_settings, db, make_record):
+    settings = make_settings(telegram_allowed_user_ids=(111,))
+    db.insert(make_record(source_id="PARITY3", body="열대야 발생"))
+
+    sent_latest: list[dict] = []
+    make_bot(settings, db, _record_handler(sent_latest)).dispatch(
+        _message_update(1, user_id=111, text="/latest")
+    )
+
+    sent_text: list[dict] = []
+    make_bot(settings, db, _record_handler(sent_text)).dispatch(
+        _message_update(1, user_id=111, text="아무 말")
+    )
+
+    assert sent_latest[0]["text"] == sent_text[0]["text"]
+    assert sent_latest[0]["reply_markup"] == sent_text[0]["reply_markup"]
+
+
+def test_latest_includes_selection_buttons_with_matching_callback_data(
+    make_settings, db, make_record
+):
+    settings = make_settings(telegram_allowed_user_ids=(111,))
+    internal_id = db.insert(make_record(source_id="PARITY4"))
+
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+    bot.dispatch(_message_update(1, user_id=111, text="/latest"))
+
+    keyboard = json.loads(sent[0]["reply_markup"])
+    labels = [b["text"] for row in keyboard["inline_keyboard"] for b in row]
+    callback_data = [b["callback_data"] for row in keyboard["inline_keyboard"] for b in row]
+
+    assert "📄 원문" in labels
+    parsed = [parse_callback_data(cd) for cd in callback_data]
+    assert all(p is not None and p[0] == internal_id for p in parsed)
+
+
+def test_no_legacy_latest_renderer_remains():
+    assert not hasattr(telegram_bot, "build_latest_reply")
+    assert not hasattr(telegram_bot, "NO_MESSAGES_REPLY")
 
 
 # -- /status ------------------------------------------------------------------

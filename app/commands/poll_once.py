@@ -23,53 +23,19 @@ directly in a recurring loop for local continuous operation.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 
 from app.collector import CollectorError, EmptyWidgetError, fetch_records
 from app.commands._shared import record_preview
 from app.config import Settings, load_settings
-from app.database import Database, open_database
+from app.database import open_database
 from app.logging_config import configure_logging
 from app.models import DisasterMessageRecord, TelegramStatus
-from app.telegram_sender import TelegramSender, TelegramSendOutcome
-from app.template_flow import build_initial_alert
+from app.telegram_sender import TelegramSender
+from app.template_flow import send_initial_alert
 
 logger = logging.getLogger(__name__)
-
-
-def _send_initial_alert(
-    sender: TelegramSender, db: Database, settings: Settings, record: DisasterMessageRecord
-) -> TelegramSendOutcome:
-    """Build and send the Service v1 initial alert, then persist the rule
-    engine's (informational-only) suggestion.
-
-    The Telegram send happens first and its outcome is always returned
-    as-is: a failure to persist `template_suggestions` afterward must never
-    look like a failed send, or the record's `telegram_status` would be
-    wrongly reverted from a real success and risk a duplicate delivery on
-    the next retry pass.
-    """
-    text, keyboard, recommended, candidates = build_initial_alert(record, settings)
-    outcome = sender.send_plain_text(text, reply_markup=keyboard)
-
-    try:
-        db.insert_template_suggestion(
-            message_id=record.internal_id,
-            recommended_template_id=recommended.template_id if recommended else None,
-            rule_score=recommended.rule_score if recommended else None,
-            candidates_json=json.dumps([vars(c) for c in candidates], ensure_ascii=False),
-            extraction_json="{}",
-            rendered_text=None,
-        )
-    except Exception:
-        logger.exception(
-            "failed to store template_suggestion for source_id=%s (send already completed)",
-            record.source_id,
-        )
-
-    return outcome
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -180,7 +146,7 @@ def run_poll_cycle(settings: Settings, *, send: bool, notify_existing: bool) -> 
             if send_targets or retry_records:
                 with TelegramSender(settings) as sender:
                     for record in [*send_targets, *retry_records]:
-                        outcome = _send_initial_alert(sender, db, settings, record)
+                        outcome = send_initial_alert(sender, db, settings, record)
                         db.update_telegram_result(
                             record.internal_id,
                             status=outcome.status,

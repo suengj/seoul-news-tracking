@@ -7,6 +7,22 @@ select -> preview -> confirm/cancel/AI state machine.
 Nothing here auto-picks or auto-confirms a template. A row in
 `template_decisions` — the future automation ground truth — is written only
 from `_handle_preview_confirm`, i.e. only from an explicit operator "최종 OK".
+
+Two distinct Telegram delivery concepts (see docs/service_v1.md):
+
+- **automatic broadcast**: only `app.commands.poll_once` uses this, for a
+  genuinely new SafeCity message. Always targets the configured
+  `TELEGRAM_CHAT_ID`, honors `TELEGRAM_SEND_ENABLED`, and persists a
+  `template_suggestions` row once.
+- **interactive reply**: `/latest`, ordinary text, and every callback
+  (template selection, preview confirm/cancel/AI). Always targets the chat_id
+  the inbound message/callback actually came from — never a silent fallback
+  to `TELEGRAM_CHAT_ID` — never gated by `TELEGRAM_SEND_ENABLED`, and never
+  persists a duplicate `template_suggestions` row.
+
+Every callback handler below additionally requires the callback's chat_id and
+user_id to match the preview's `interaction_chat_id`/`selected_by` before
+acting on it — see `_preview_matches_caller`.
 """
 
 from __future__ import annotations
@@ -16,7 +32,7 @@ import logging
 
 from app.ai_client import generate_slots
 from app.config import Settings
-from app.database import Database
+from app.database import Database, TemplatePreview
 from app.models import DisasterMessageRecord, TelegramStatus
 from app.telegram_sender import (
     TelegramSender,
@@ -31,6 +47,7 @@ from app.telegram_sender import (
     build_selection_keyboard,
     build_stale_preview_message,
     build_template_alert_message,
+    build_unavailable_request_message,
     parse_callback_data,
     parse_preview_callback_data,
 )
@@ -48,6 +65,8 @@ AI_PROMPT_VERSION = "v1"
 # preview only" policy.
 _ACTIVE_PREVIEW_STATUSES = ("rule_preview", "ai_preview")
 
+NO_MESSAGES_REPLY = "아직 저장된 재난문자가 없습니다."
+
 
 def _slots_to_json(slots: dict[str, SlotValue]) -> str:
     return json.dumps({name: vars(v) for name, v in slots.items()}, ensure_ascii=False)
@@ -59,6 +78,16 @@ def _json_to_slots(slots_json: str | None) -> dict[str, SlotValue]:
     except json.JSONDecodeError:
         return {}
     return {name: SlotValue(**value) for name, value in raw.items()}
+
+
+def _preview_matches_caller(
+    preview: TemplatePreview, *, chat_id: str | int, user_id: int | None
+) -> bool:
+    """A confirm/cancel/AI callback may only act on a preview if it comes
+    from the exact chat the preview's selection button lived in, from the
+    same user who selected it — never a different chat or a different
+    (even if also authorized) operator."""
+    return preview.interaction_chat_id == str(chat_id) and preview.selected_by == user_id
 
 
 def build_initial_alert(
@@ -90,21 +119,27 @@ def build_initial_alert(
     return text, keyboard, recommended, candidates
 
 
-NO_MESSAGES_REPLY = "아직 저장된 재난문자가 없습니다."
-
-
 def send_initial_alert(
-    sender: TelegramSender, db: Database, settings: Settings, record: DisasterMessageRecord
+    sender: TelegramSender,
+    db: Database,
+    settings: Settings,
+    record: DisasterMessageRecord,
+    *,
+    target_chat_id: str | int,
+    persist_suggestion: bool = True,
+    enforce_send_enabled: bool = True,
+    reply_to_message_id: int | None = None,
 ) -> TelegramSendOutcome:
-    """Build and send the Service v1 initial alert, then persist the rule
-    engine's (informational-only) suggestion.
+    """Build and send the Service v1 initial alert to `target_chat_id`.
 
     This is the single rendering path for a disaster-message alert: it is
-    used both for a genuinely new SafeCity record (`app.commands.poll_once`)
-    and for `/latest`/ordinary-text requests re-displaying the latest one
-    (`app.telegram_bot.send_latest_alert`), so the two are always
-    byte-for-byte identical — original text, selection buttons, and
-    callback data alike.
+    used both for a genuinely new SafeCity record (`app.commands.poll_once`,
+    `target_chat_id=settings.telegram_chat_id`, `persist_suggestion=True`,
+    `enforce_send_enabled=True`) and for `/latest`/ordinary-text requests
+    re-displaying the latest one (`send_latest_alert` below,
+    `target_chat_id=<inbound chat_id>`, `persist_suggestion=False`,
+    `enforce_send_enabled=False`), so the rendered text/keyboard are always
+    byte-for-byte identical while delivery target and persistence differ.
 
     The Telegram send happens first and its outcome is always returned
     as-is: a failure to persist `template_suggestions` afterward must never
@@ -113,35 +148,68 @@ def send_initial_alert(
     the next retry pass.
     """
     text, keyboard, recommended, candidates = build_initial_alert(record, settings)
-    outcome = sender.send_plain_text(text, reply_markup=keyboard)
+    outcome = sender.send_plain_text(
+        text,
+        chat_id=target_chat_id,
+        reply_markup=keyboard,
+        reply_to_message_id=reply_to_message_id,
+        enforce_send_enabled=enforce_send_enabled,
+    )
 
-    try:
-        db.insert_template_suggestion(
-            message_id=record.internal_id,
-            recommended_template_id=recommended.template_id if recommended else None,
-            rule_score=recommended.rule_score if recommended else None,
-            candidates_json=json.dumps([vars(c) for c in candidates], ensure_ascii=False),
-            extraction_json="{}",
-            rendered_text=None,
-        )
-    except Exception:
-        logger.exception(
-            "failed to store template_suggestion for message_id=%s (send already completed)",
-            record.internal_id,
-        )
+    if persist_suggestion:
+        try:
+            db.insert_template_suggestion(
+                message_id=record.internal_id,
+                recommended_template_id=recommended.template_id if recommended else None,
+                rule_score=recommended.rule_score if recommended else None,
+                candidates_json=json.dumps([vars(c) for c in candidates], ensure_ascii=False),
+                extraction_json="{}",
+                rendered_text=None,
+            )
+        except Exception:
+            logger.exception(
+                "failed to store template_suggestion for message_id=%s (send already completed)",
+                record.internal_id,
+            )
 
     return outcome
 
 
-def send_latest_alert(db: Database, settings: Settings, sender: TelegramSender) -> TelegramSendOutcome:
+def send_latest_alert(
+    db: Database,
+    settings: Settings,
+    sender: TelegramSender,
+    *,
+    chat_id: str | int,
+    reply_to_message_id: int | None = None,
+) -> TelegramSendOutcome:
     """Used by `/latest` and ordinary-text handling in `app.telegram_bot` —
     re-renders the most recently collected message through exactly
     `send_initial_alert` above, the same path a newly detected message
-    uses, instead of a separate summary-only renderer."""
+    uses, instead of a separate summary-only renderer.
+
+    Always an interactive reply: sent only to `chat_id` (the chat that
+    asked), never gated by TELEGRAM_SEND_ENABLED, and never stores another
+    `template_suggestions` row for what is just a replay of an existing one.
+    """
     record = db.get_latest_record()
     if record is None:
-        return sender.send_plain_text(NO_MESSAGES_REPLY)
-    return send_initial_alert(sender, db, settings, record)
+        return sender.send_plain_text(
+            NO_MESSAGES_REPLY,
+            chat_id=chat_id,
+            reply_to_message_id=reply_to_message_id,
+            enforce_send_enabled=False,
+        )
+    return send_initial_alert(
+        sender,
+        db,
+        settings,
+        record,
+        target_chat_id=chat_id,
+        persist_suggestion=False,
+        enforce_send_enabled=False,
+        reply_to_message_id=reply_to_message_id,
+    )
 
 
 def _authorized(settings: Settings, user_id: int | None) -> bool:
@@ -153,7 +221,14 @@ def dispatch_callback(
 ) -> None:
     """Single entry point for every inline-button press: template selection,
     preview confirm/cancel/AI. Authorization and the duplicate-callback guard
-    both happen here, before any routing."""
+    both happen here, before any routing.
+
+    Every response is routed to `interaction_chat_id` — the chat the
+    callback's own message lives in (`callback_query.message.chat.id`) —
+    never to the configured broadcast `TELEGRAM_CHAT_ID`. If that chat id is
+    missing (malformed update), the callback is acknowledged (stops the
+    Telegram spinner) but nothing further happens: no default-chat fallback.
+    """
     callback_query_id = callback_query.get("id", "")
     # Answer immediately so Telegram stops showing the loading spinner,
     # regardless of what happens next.
@@ -161,12 +236,35 @@ def dispatch_callback(
 
     from_user = callback_query.get("from") or {}
     user_id = from_user.get("id")
+
+    message = callback_query.get("message")
+    chat = message.get("chat") if isinstance(message, dict) else None
+    interaction_chat_id = chat.get("id") if isinstance(chat, dict) else None
+
+    if interaction_chat_id is None:
+        logger.error(
+            "callback_query_id=%s user_id=%s outcome=missing_chat_id — refusing to route",
+            callback_query_id,
+            user_id,
+        )
+        return
+
     if not _authorized(settings, user_id):
-        logger.warning("rejected callback from unauthorized user_id=%s", user_id)
+        logger.warning(
+            "callback_query_id=%s user_id=%s chat_id=%s outcome=unauthorized",
+            callback_query_id,
+            user_id,
+            interaction_chat_id,
+        )
         return
 
     if callback_query_id and db.has_processed_callback(callback_query_id):
-        logger.info("duplicate callback_query_id=%s ignored (already processed)", callback_query_id)
+        logger.info(
+            "callback_query_id=%s user_id=%s chat_id=%s outcome=duplicate_ignored",
+            callback_query_id,
+            user_id,
+            interaction_chat_id,
+        )
         return
 
     data = callback_query.get("data") or ""
@@ -185,6 +283,15 @@ def dispatch_callback(
                 template_id=template_id,
                 user_id=user_id,
                 callback_query_id=callback_query_id,
+                interaction_chat_id=interaction_chat_id,
+            )
+            logger.info(
+                "callback_query_id=%s user_id=%s chat_id=%s action=template_select "
+                "routed_chat_id=%s outcome=handled",
+                callback_query_id,
+                user_id,
+                interaction_chat_id,
+                interaction_chat_id,
             )
         except Exception:
             logger.exception("template selection handling failed for message_id=%s", message_id)
@@ -197,16 +304,53 @@ def dispatch_callback(
             db.mark_callback_processed(callback_query_id)
         try:
             if action == "confirm":
-                _handle_preview_confirm(db, settings, sender, preview_id=preview_id, user_id=user_id)
+                _handle_preview_confirm(
+                    db,
+                    settings,
+                    sender,
+                    preview_id=preview_id,
+                    user_id=user_id,
+                    interaction_chat_id=interaction_chat_id,
+                )
             elif action == "cancel":
-                _handle_preview_cancel(db, settings, sender, preview_id=preview_id, user_id=user_id)
+                _handle_preview_cancel(
+                    db,
+                    settings,
+                    sender,
+                    preview_id=preview_id,
+                    user_id=user_id,
+                    interaction_chat_id=interaction_chat_id,
+                )
             else:
-                _handle_preview_ai(db, settings, sender, preview_id=preview_id, user_id=user_id)
+                _handle_preview_ai(
+                    db,
+                    settings,
+                    sender,
+                    preview_id=preview_id,
+                    user_id=user_id,
+                    interaction_chat_id=interaction_chat_id,
+                )
+            logger.info(
+                "callback_query_id=%s user_id=%s chat_id=%s action=preview_%s "
+                "routed_chat_id=%s outcome=handled",
+                callback_query_id,
+                user_id,
+                interaction_chat_id,
+                action,
+                interaction_chat_id,
+            )
         except Exception:
-            logger.exception("preview action=%s handling failed for preview_id=%s", action, preview_id)
+            logger.exception(
+                "preview action=%s handling failed for preview_id=%s", action, preview_id
+            )
         return
 
-    logger.warning("rejected malformed callback_data=%r", data)
+    logger.warning(
+        "callback_query_id=%s user_id=%s chat_id=%s outcome=malformed_data",
+        callback_query_id,
+        user_id,
+        interaction_chat_id,
+    )
 
 
 def _handle_template_selection(
@@ -218,13 +362,16 @@ def _handle_template_selection(
     template_id: str,
     user_id: int,
     callback_query_id: str,
+    interaction_chat_id: str | int,
 ) -> None:
     record = db.get_by_internal_id(message_id)
     if record is None:
         logger.warning("selection callback references unknown message_id=%s", message_id)
         return
 
-    extraction = extract_slots(template_id, record.original_body, record.sender_or_region, record.sent_at)
+    extraction = extract_slots(
+        template_id, record.original_body, record.sender_or_region, record.sent_at
+    )
     render_result = render_template(template_id, extraction.extracted_slots)
     extraction_json = _slots_to_json(extraction.extracted_slots)
 
@@ -257,6 +404,7 @@ def _handle_template_selection(
             rendered_text=render_result.rendered_text,
             missing_slots_json=json.dumps(render_result.missing_slots, ensure_ascii=False),
             status="rule_preview",
+            interaction_chat_id=interaction_chat_id,
         )
     except Exception:
         logger.exception("failed to create preview for message_id=%s", message_id)
@@ -270,11 +418,16 @@ def _handle_template_selection(
         keyboard = build_preview_keyboard(preview_id, complete=True, ai_enabled=ai_enabled)
     else:
         text = build_preview_incomplete_message(
-            template_id, extraction.extracted_slots, render_result.missing_slots, record.original_body
+            template_id,
+            extraction.extracted_slots,
+            render_result.missing_slots,
+            record.original_body,
         )
         keyboard = build_preview_keyboard(preview_id, complete=False, ai_enabled=ai_enabled)
 
-    outcome = sender.send_plain_text(text, reply_markup=keyboard)
+    outcome = sender.send_plain_text(
+        text, chat_id=interaction_chat_id, reply_markup=keyboard, enforce_send_enabled=False
+    )
     if outcome.status == TelegramStatus.TELEGRAM_FAILED:
         logger.error("failed to deliver preview for preview_id=%s: %s", preview_id, outcome.error)
         try:
@@ -285,12 +438,35 @@ def _handle_template_selection(
             logger.exception("failed to record delivery failure for preview_id=%s", preview_id)
 
 
+def _reject_cross_chat(
+    sender: TelegramSender, *, interaction_chat_id: str | int, preview_id: int
+) -> None:
+    logger.warning(
+        "rejected cross-chat/cross-user callback for preview_id=%s from chat_id=%s",
+        preview_id,
+        interaction_chat_id,
+    )
+    sender.send_plain_text(
+        build_unavailable_request_message(), chat_id=interaction_chat_id, enforce_send_enabled=False
+    )
+
+
 def _handle_preview_confirm(
-    db: Database, settings: Settings, sender: TelegramSender, *, preview_id: int, user_id: int
+    db: Database,
+    settings: Settings,
+    sender: TelegramSender,
+    *,
+    preview_id: int,
+    user_id: int,
+    interaction_chat_id: str | int,
 ) -> None:
     preview = db.get_preview(preview_id)
     if preview is None:
         logger.warning("confirm callback references unknown preview_id=%s", preview_id)
+        return
+
+    if not _preview_matches_caller(preview, chat_id=interaction_chat_id, user_id=user_id):
+        _reject_cross_chat(sender, interaction_chat_id=interaction_chat_id, preview_id=preview_id)
         return
 
     if preview.status == "confirmed":
@@ -298,7 +474,9 @@ def _handle_preview_confirm(
         # (not a duplicate Telegram delivery, which is already filtered out
         # upstream) — resend the same confirmation, write nothing new.
         sender.send_plain_text(
-            build_confirmation_message(preview.selected_template_id, preview.rendered_text or "")
+            build_confirmation_message(preview.selected_template_id, preview.rendered_text or ""),
+            chat_id=interaction_chat_id,
+            enforce_send_enabled=False,
         )
         return
 
@@ -308,7 +486,9 @@ def _handle_preview_confirm(
         logger.info(
             "confirm rejected for preview_id=%s in non-active status=%s", preview_id, preview.status
         )
-        sender.send_plain_text(build_stale_preview_message())
+        sender.send_plain_text(
+            build_stale_preview_message(), chat_id=interaction_chat_id, enforce_send_enabled=False
+        )
         return
 
     missing_slots = json.loads(preview.missing_slots_json or "[]")
@@ -337,7 +517,9 @@ def _handle_preview_confirm(
         # success. The preview is untouched (still rule_preview/ai_preview),
         # so the same 최종 OK button can be retried.
         logger.exception("failed to persist decision for preview_id=%s", preview_id)
-        sender.send_plain_text(build_confirm_failed_message())
+        sender.send_plain_text(
+            build_confirm_failed_message(), chat_id=interaction_chat_id, enforce_send_enabled=False
+        )
         return
 
     try:
@@ -351,15 +533,29 @@ def _handle_preview_confirm(
             "decision persisted but preview status update failed for preview_id=%s", preview_id
         )
 
-    sender.send_plain_text(build_confirmation_message(preview.selected_template_id, preview.rendered_text))
+    sender.send_plain_text(
+        build_confirmation_message(preview.selected_template_id, preview.rendered_text),
+        chat_id=interaction_chat_id,
+        enforce_send_enabled=False,
+    )
 
 
 def _handle_preview_cancel(
-    db: Database, settings: Settings, sender: TelegramSender, *, preview_id: int, user_id: int
+    db: Database,
+    settings: Settings,
+    sender: TelegramSender,
+    *,
+    preview_id: int,
+    user_id: int,
+    interaction_chat_id: str | int,
 ) -> None:
     preview = db.get_preview(preview_id)
     if preview is None:
         logger.warning("cancel callback references unknown preview_id=%s", preview_id)
+        return
+
+    if not _preview_matches_caller(preview, chat_id=interaction_chat_id, user_id=user_id):
+        _reject_cross_chat(sender, interaction_chat_id=interaction_chat_id, preview_id=preview_id)
         return
 
     if preview.status not in _ACTIVE_PREVIEW_STATUSES:
@@ -368,7 +564,9 @@ def _handle_preview_cancel(
         logger.info(
             "cancel rejected for preview_id=%s in non-active status=%s", preview_id, preview.status
         )
-        sender.send_plain_text(build_stale_preview_message())
+        sender.send_plain_text(
+            build_stale_preview_message(), chat_id=interaction_chat_id, enforce_send_enabled=False
+        )
         return
 
     try:
@@ -380,28 +578,46 @@ def _handle_preview_cancel(
     original_body = record.original_body if record is not None else ""
     text = build_cancel_message(original_body)
     keyboard = build_selection_keyboard(preview.message_id)
-    sender.send_plain_text(text, reply_markup=keyboard)
+    sender.send_plain_text(
+        text, chat_id=interaction_chat_id, reply_markup=keyboard, enforce_send_enabled=False
+    )
 
 
 def _handle_preview_ai(
-    db: Database, settings: Settings, sender: TelegramSender, *, preview_id: int, user_id: int
+    db: Database,
+    settings: Settings,
+    sender: TelegramSender,
+    *,
+    preview_id: int,
+    user_id: int,
+    interaction_chat_id: str | int,
 ) -> None:
     preview = db.get_preview(preview_id)
     if preview is None:
         logger.warning("ai callback references unknown preview_id=%s", preview_id)
         return
 
+    if not _preview_matches_caller(preview, chat_id=interaction_chat_id, user_id=user_id):
+        _reject_cross_chat(sender, interaction_chat_id=interaction_chat_id, preview_id=preview_id)
+        return
+
     if preview.status not in _ACTIVE_PREVIEW_STATUSES:
         logger.info(
             "ai rejected for preview_id=%s in non-active status=%s", preview_id, preview.status
         )
-        sender.send_plain_text(build_stale_preview_message())
+        sender.send_plain_text(
+            build_stale_preview_message(), chat_id=interaction_chat_id, enforce_send_enabled=False
+        )
         return
 
     if not settings.ai_configured:
         # The button should already be hidden when AI is disabled — this is
         # defense-in-depth only, never the primary path.
-        sender.send_plain_text("AI 기능이 비활성화되어 있습니다. (AI_ENABLED=false)")
+        sender.send_plain_text(
+            "AI 기능이 비활성화되어 있습니다. (AI_ENABLED=false)",
+            chat_id=interaction_chat_id,
+            enforce_send_enabled=False,
+        )
         return
 
     record = db.get_by_internal_id(preview.message_id)
@@ -464,7 +680,9 @@ def _handle_preview_ai(
         # Same (original) preview_id — no new preview row for a failed
         # attempt; Cancel is still available, no AI retry button.
         keyboard = build_preview_keyboard(preview_id, complete=False, ai_enabled=False)
-        sender.send_plain_text(text, reply_markup=keyboard)
+        sender.send_plain_text(
+            text, chat_id=interaction_chat_id, reply_markup=keyboard, enforce_send_enabled=False
+        )
         return
 
     render_result = render_template(preview.selected_template_id, result.slots)
@@ -479,6 +697,7 @@ def _handle_preview_ai(
             missing_slots_json=json.dumps(render_result.missing_slots, ensure_ascii=False),
             status="ai_preview",
             ai_generation_id=ai_generation_id,
+            interaction_chat_id=interaction_chat_id,
         )
     except Exception:
         logger.exception("failed to create ai preview for message_id=%s", preview.message_id)
@@ -502,8 +721,13 @@ def _handle_preview_ai(
         keyboard = build_confirmed_preview_keyboard(ai_preview_id)
     else:
         text = build_preview_incomplete_message(
-            preview.selected_template_id, result.slots, render_result.missing_slots, record.original_body
+            preview.selected_template_id,
+            result.slots,
+            render_result.missing_slots,
+            record.original_body,
         )
         keyboard = build_preview_keyboard(ai_preview_id, complete=False, ai_enabled=False)
 
-    sender.send_plain_text(text, reply_markup=keyboard)
+    sender.send_plain_text(
+        text, chat_id=interaction_chat_id, reply_markup=keyboard, enforce_send_enabled=False
+    )

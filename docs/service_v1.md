@@ -1,5 +1,9 @@
 # Service v1: human-first template selection
 
+Current version: see `pyproject.toml` / `app/version.py` (also shown in the
+Telegram bot's startup log and `/status` reply) — see `docs/versioning.md`
+for the release process. As of this writing: **0.1.1**.
+
 Service v1 integrates the recurring local poller and Telegram command bot
 (previously a separate branch) with the deterministic template engine
 (previously another separate branch) into one small, compact runtime. The
@@ -31,6 +35,68 @@ never auto-selects, auto-renders-and-sends, or auto-confirms anything.
    already picked) to re-extract the same slots; on success this produces a
    *new* preview with only [✅ 최종 OK] [↩️ 취소] (AI never re-offers itself).
 ```
+
+## Broadcast vs. interactive delivery
+
+Two distinct Telegram delivery concepts, both implemented on top of
+`TelegramSender.send_plain_text(chat_id=..., enforce_send_enabled=...)`
+(`app/telegram_sender.py`) — never conflated, never a silent fallback from
+one to the other:
+
+| | Automatic broadcast | Interactive reply |
+|---|---|---|
+| When | Poller detects a genuinely new SafeCity message (`app.commands.poll_once`) | `/latest`, ordinary text, `/status`, `/pause`, `/resume`, `/help`, any callback (template selection, preview confirm/cancel/AI) |
+| Target chat | `TELEGRAM_CHAT_ID` (the configured broadcast chat), always | The chat_id the inbound message/callback actually came from — `message.chat.id` or `callback_query.message.chat.id` |
+| `TELEGRAM_SEND_ENABLED` | Honored — the flag gates this | Never honored — a direct reply to something an operator just did must never be silently dropped |
+| Persists `template_suggestions`? | Yes, once | No (a `/latest` replay never adds a second row) |
+
+`app.template_flow.send_initial_alert(..., target_chat_id, persist_suggestion,
+enforce_send_enabled)` is the single function both paths call — the
+rendered text/keyboard are always byte-for-byte identical, only the target
+chat and persistence differ. `send_latest_alert` (used by `/latest`/text)
+always passes the inbound chat_id and `persist_suggestion=False`.
+`app.commands.poll_once` always passes `settings.telegram_chat_id` and
+`persist_suggestion=True`.
+
+Every callback handler in `app.template_flow.dispatch_callback` extracts
+`interaction_chat_id` from `callback_query.message.chat.id` — the chat the
+inline keyboard actually lives in — and routes its response there. If that
+field is missing (a malformed update), the callback is acknowledged (so
+Telegram's spinner stops) but nothing else happens: there is no default-chat
+fallback for a callback with unknown routing.
+
+### Preview ownership: bound to the originating chat and user
+
+`template_previews.interaction_chat_id` records the chat a preview's
+selection button was pressed in. Every confirm/cancel/AI callback requires
+**both** the callback's current chat_id and user_id to match the preview's
+`interaction_chat_id`/`selected_by` before acting — a mismatch (a different
+authorized operator, or the same operator from a different chat) gets:
+
+```
+[사용할 수 없는 요청]
+
+이 초안이 생성된 Telegram 대화에서 다시 시도해 주세요.
+```
+
+and the preview is left completely untouched — never resurrected, never
+revealed to the mismatched caller. A database created before this column
+existed migrates it in automatically (`NULL` for old rows, which then never
+match any caller and simply can't be acted on again — expected for rows
+predating this fix).
+
+### Diagnosing repeated/misrouted responses
+
+If `TELEGRAM_CHAT_ID` appears to receive a reply that wasn't a genuine new
+SafeCity message, or an operator reports getting no reply to `/latest`,
+check the bot's INFO-level attribution logs (`app/telegram_bot.py::dispatch`,
+`app/template_flow.py::dispatch_callback`): each inbound update logs
+`update_id`, `user_id`, `chat_id`, `command`/`action`, `routed_chat_id`, and
+`outcome` (never the message text or disaster-message body). If
+`routed_chat_id` ever equals `TELEGRAM_CHAT_ID` for something other than an
+automatic broadcast, that is the bug to chase — it should be structurally
+impossible after this fix, since every interactive call site passes its own
+inbound `chat_id` explicitly and never relies on `send_plain_text`'s default.
 
 ## Action vs. preview vs. decision
 
@@ -136,9 +202,9 @@ re-confirmed (idempotent resend) but never cancelled.
 - The active-preview supersede policy is scoped to `(message_id,
   selected_by)` — if two different authorized operators both select
   templates for the same message, each operator's own previews supersede
-  each other independently, not across operators. Not hardened further:
-  that would need per-message locking, which is out of scope for this
-  compact a service.
+  each other independently, not across operators. Each operator's preview is
+  also bound to the chat they selected it from (see "Preview ownership"
+  above), so this is a scoping choice, not a routing gap.
 
 ## Next phase (not in this session)
 

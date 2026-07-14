@@ -11,6 +11,10 @@ webhook migration note). One `getUpdates` offset sequence handles both:
   delegated to `app.template_flow.dispatch_callback`, which does its own
   authorization and duplicate-callback checks
 
+Every one of the above is an **interactive reply**: it always targets the
+chat_id the inbound message/callback actually came from, never the
+configured broadcast `TELEGRAM_CHAT_ID` — see docs/service_v1.md.
+
 Never crashes the loop on malformed/unsupported update types. This module
 does not decide *when* to poll Seoul SafeCity — that is app/poller.py's
 job. The two communicate only through the shared SQLite `system_state` row
@@ -39,6 +43,7 @@ from app.telegram_sender import (
     format_timestamp,
 )
 from app.template_flow import dispatch_callback, send_latest_alert
+from app.version import get_version
 
 __all__ = [
     "SingleInstanceLock",
@@ -95,6 +100,7 @@ def build_status_reply(db: Database, settings: Settings, *, now: datetime | None
     report = db.status_report()
 
     lines = ["\\[Seoul News Tracking 상태\\]", ""]
+    lines.append(escape_markdown_v2(f"버전: {get_version()}"))
 
     if not state.polling_enabled:
         lines.append(f"수집 상태: {escape_markdown_v2('일시정지')}")
@@ -155,8 +161,11 @@ class TelegramBotRunner:
             ),
             transport=transport,
         )
-        self._offset = 0
+        self._offset = db.get_telegram_update_offset()
         self._running = True
+        logger.info(
+            "Telegram bot starting: version=%s persisted_offset=%d", get_version(), self._offset
+        )
 
     def close(self) -> None:
         self._client.close()
@@ -193,6 +202,7 @@ class TelegramBotRunner:
                     )
                 finally:
                     self._offset = update["update_id"] + 1
+                    self.db.set_telegram_update_offset(self._offset)
 
             iterations += 1
             if max_iterations is not None and iterations >= max_iterations:
@@ -225,6 +235,8 @@ class TelegramBotRunner:
         return data.get("result", [])
 
     def dispatch(self, update: dict[str, Any]) -> DispatchOutcome:
+        update_id = update.get("update_id") if isinstance(update, dict) else None
+
         if not isinstance(update, dict):
             logger.debug("ignoring non-dict update: %r", type(update))
             return DispatchOutcome(handled=False, authorized=None, command=None)
@@ -258,22 +270,43 @@ class TelegramBotRunner:
         authorized = user_id in self.settings.telegram_allowed_user_ids
         stripped = text.strip()
         command = stripped.split()[0].lower() if stripped else ""
+        command_category = command if command.startswith("/") else "(text)"
 
         if not authorized:
             logger.warning(
                 "rejected unauthorized user_id=%s command=%r", user_id, command or "(text)"
             )
             self._reply(chat_id, message_id, UNAUTHORIZED_REPLY)
+            logger.info(
+                "update_id=%s type=message user_id=%s chat_id=%s command=%s "
+                "routed_chat_id=%s outcome=unauthorized",
+                update_id,
+                user_id,
+                chat_id,
+                command_category,
+                chat_id,
+            )
             return DispatchOutcome(handled=True, authorized=False, command=command)
 
-        reply_text = self._handle_authorized(stripped, command, user_id)
+        reply_text = self._handle_authorized(stripped, command, user_id, chat_id, message_id)
         if reply_text is not None:
             self._reply(chat_id, message_id, reply_text)
+        logger.info(
+            "update_id=%s type=message user_id=%s chat_id=%s command=%s "
+            "routed_chat_id=%s outcome=handled",
+            update_id,
+            user_id,
+            chat_id,
+            command_category,
+            chat_id,
+        )
         return DispatchOutcome(handled=True, authorized=True, command=command)
 
-    def _handle_authorized(self, stripped_text: str, command: str, user_id: int) -> str | None:
+    def _handle_authorized(
+        self, stripped_text: str, command: str, user_id: int, chat_id: int, message_id: int | None
+    ) -> str | None:
         if command == "/latest":
-            self._send_latest_alert()
+            self._send_latest_alert(chat_id)
             return None
         if command == "/status":
             return build_status_reply(self.db, self.settings)
@@ -288,13 +321,13 @@ class TelegramBotRunner:
         # Ordinary text behaves the same as /latest: the exact same
         # rendering path a newly detected message uses (see
         # `app.template_flow.send_initial_alert`), not a separate summary.
-        self._send_latest_alert()
+        self._send_latest_alert(chat_id)
         return None
 
-    def _send_latest_alert(self) -> None:
-        outcome = send_latest_alert(self.db, self.settings, self.sender)
+    def _send_latest_alert(self, chat_id: int) -> None:
+        outcome = send_latest_alert(self.db, self.settings, self.sender, chat_id=chat_id)
         if outcome.status == TelegramStatus.TELEGRAM_FAILED:
-            logger.error("failed to send /latest alert: %s", outcome.error)
+            logger.error("failed to send /latest alert to chat_id=%s: %s", chat_id, outcome.error)
 
     def _handle_pause(self, user_id: int) -> str:
         changed = self.db.pause_polling(actor_user_id=user_id)

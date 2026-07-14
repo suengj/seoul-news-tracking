@@ -25,7 +25,15 @@ class FailingRecommendSender:
     def __exit__(self, *exc_info):
         return False
 
-    def send_plain_text(self, text, reply_markup=None):
+    def send_plain_text(
+        self,
+        text,
+        *,
+        chat_id=None,
+        reply_to_message_id=None,
+        reply_markup=None,
+        enforce_send_enabled=True,
+    ):
         self.sent_texts.append(text)
         return TelegramSendOutcome(status=TelegramStatus.TELEGRAM_SENT, message_ids=["1"])
 
@@ -59,7 +67,9 @@ def test_template_pipeline_failure_never_blocks_original_alert(env_setup, monkey
     record = make_record(source_id="DS-FAIL", body="폭염주의보 발효 중")
 
     def _fetch_one(**kwargs):
-        return CollectionResult(records=[record], method="x", fetched_count=1, full_text_confirmed=True)
+        return CollectionResult(
+            records=[record], method="x", fetched_count=1, full_text_confirmed=True
+        )
 
     monkeypatch.setattr(poll_once, "fetch_records", _fetch_one)
 

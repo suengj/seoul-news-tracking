@@ -163,13 +163,41 @@ class TelegramSender:
         )
 
     def send_plain_text(
-        self, text: str, reply_markup: dict | None = None
+        self,
+        text: str,
+        *,
+        chat_id: str | int | None = None,
+        reply_to_message_id: int | None = None,
+        reply_markup: dict | None = None,
+        enforce_send_enabled: bool = True,
     ) -> TelegramSendOutcome:
-        """Send plain (unformatted) text to the configured chat — used for the
-        entire template-selection/preview/confirm/cancel/AI flow so rendered
+        """Send plain (unformatted) text — used for the entire initial-alert /
+        template-selection/preview/confirm/cancel/AI flow so rendered
         template/original text is delivered byte-for-byte with no MarkdownV2
-        escaping. `reply_markup`, if given, is attached only to the last chunk."""
-        return self._send(text, enforce_send_enabled=True, parse_mode=None, reply_markup=reply_markup)
+        escaping. `reply_markup`, if given, is attached only to the last chunk.
+
+        Two distinct delivery concepts share this one method (see
+        docs/service_v1.md "broadcast vs interactive delivery"):
+
+        - automatic broadcast (a genuinely new SafeCity message): caller
+          passes the configured `chat_id` explicitly and leaves
+          `enforce_send_enabled=True` (the default) so TELEGRAM_SEND_ENABLED
+          still gates it.
+        - interactive reply (/latest, ordinary text, any callback): caller
+          MUST pass the inbound `chat_id` explicitly (never the default) and
+          `enforce_send_enabled=False`, since a direct reply to something an
+          operator just clicked or typed must never be silently dropped by
+          TELEGRAM_SEND_ENABLED and must never fall back to the configured
+          broadcast chat.
+        """
+        return self._send(
+            text,
+            enforce_send_enabled=enforce_send_enabled,
+            parse_mode=None,
+            chat_id=chat_id,
+            reply_to_message_id=reply_to_message_id,
+            reply_markup=reply_markup,
+        )
 
     def _send(
         self,
@@ -272,7 +300,11 @@ class TelegramSender:
         try:
             self._client.post(
                 url,
-                data={"callback_query_id": callback_query_id, "text": text, "show_alert": show_alert},
+                data={
+                    "callback_query_id": callback_query_id,
+                    "text": text,
+                    "show_alert": show_alert,
+                },
             )
         except (httpx.TimeoutException, httpx.ConnectError) as exc:
             logger.warning("answerCallbackQuery failed: %s", exc)
@@ -290,7 +322,9 @@ class TelegramSender:
             timeout=httpx.Timeout(connect=5.0, read=timeout + 10.0, write=10.0, pool=10.0),
         )
         if response.status_code != 200:
-            raise TelegramTemporaryError(f"getUpdates HTTP {response.status_code}: {response.text[:200]}")
+            raise TelegramTemporaryError(
+                f"getUpdates HTTP {response.status_code}: {response.text[:200]}"
+            )
         return response.json().get("result", [])
 
 
@@ -373,7 +407,10 @@ def build_selection_keyboard(message_id: int) -> dict:
     rows: list[list[dict]] = []
     for template_ids in _SELECTION_BUTTON_ROWS:
         row = [
-            {"text": templates[tid].button_label, "callback_data": make_callback_data(message_id, tid)}
+            {
+                "text": templates[tid].button_label,
+                "callback_data": make_callback_data(message_id, tid),
+            }
             for tid in template_ids
             if templates[tid].enabled
         ]
@@ -409,10 +446,19 @@ def build_template_alert_message(
 def build_preview_keyboard(preview_id: int, *, complete: bool, ai_enabled: bool) -> dict:
     row: list[dict] = []
     if complete:
-        row.append({"text": "✅ 최종 OK", "callback_data": make_preview_callback_data(preview_id, "confirm")})
-    row.append({"text": "↩️ 취소", "callback_data": make_preview_callback_data(preview_id, "cancel")})
+        row.append(
+            {
+                "text": "✅ 최종 OK",
+                "callback_data": make_preview_callback_data(preview_id, "confirm"),
+            }
+        )
+    row.append(
+        {"text": "↩️ 취소", "callback_data": make_preview_callback_data(preview_id, "cancel")}
+    )
     if ai_enabled:
-        row.append({"text": "🤖 AI로 작성", "callback_data": make_preview_callback_data(preview_id, "ai")})
+        row.append(
+            {"text": "🤖 AI로 작성", "callback_data": make_preview_callback_data(preview_id, "ai")}
+        )
     return {"inline_keyboard": [row]}
 
 
@@ -421,8 +467,14 @@ def build_confirmed_preview_keyboard(preview_id: int) -> dict:
     return {
         "inline_keyboard": [
             [
-                {"text": "✅ 최종 OK", "callback_data": make_preview_callback_data(preview_id, "confirm")},
-                {"text": "↩️ 취소", "callback_data": make_preview_callback_data(preview_id, "cancel")},
+                {
+                    "text": "✅ 최종 OK",
+                    "callback_data": make_preview_callback_data(preview_id, "confirm"),
+                },
+                {
+                    "text": "↩️ 취소",
+                    "callback_data": make_preview_callback_data(preview_id, "cancel"),
+                },
             ]
         ]
     }
@@ -486,7 +538,16 @@ def build_preview_incomplete_message(
 def build_confirmation_message(template_id: str, final_rendered_text: str) -> str:
     templates = load_templates()
     display_name = templates[template_id].display_name if template_id in templates else template_id
-    lines = ["[최종 확정 완료]", "", "포맷:", display_name, "", "작성 문안:", "", final_rendered_text]
+    lines = [
+        "[최종 확정 완료]",
+        "",
+        "포맷:",
+        display_name,
+        "",
+        "작성 문안:",
+        "",
+        final_rendered_text,
+    ]
     return "\n".join(lines)
 
 
@@ -512,4 +573,12 @@ def build_stale_preview_message() -> str:
         "더 최신 초안이 있거나 이미 취소된 초안입니다.",
         "최신 Telegram 메시지의 버튼을 사용해 주세요.",
     ]
+    return "\n".join(lines)
+
+
+def build_unavailable_request_message() -> str:
+    """Shown when a callback's originating chat/user doesn't match the
+    preview it targets — never resurrects or reveals the preview's content
+    to the mismatched caller."""
+    lines = ["[사용할 수 없는 요청]", "", "이 초안이 생성된 Telegram 대화에서 다시 시도해 주세요."]
     return "\n".join(lines)

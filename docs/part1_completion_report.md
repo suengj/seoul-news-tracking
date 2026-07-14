@@ -249,3 +249,80 @@ region list was actually extracted) all produced correct, complete drafts.
   validation is pending that key, per `docs/service_v1.md`.
 - PR #1 and PR #3 (the two source branches) are superseded by the merged
   Service v1 PR and closed with a comment pointing to it.
+
+## 10. Service v1 runtime hardening (added 2026-07-14)
+
+Four targeted fixes to the merged Service v1 flow, requested after the
+initial merge, on branch `feature/service-v1-runtime-hardening`:
+
+1. **Confirm handler never reports success on DB failure**
+   (`app/template_flow.py::_handle_preview_confirm`): the decision is now
+   written *before* the preview is marked confirmed, and the `[최종 확정
+   완료]` reply is only sent after the decision write succeeds. A decision
+   write failure sends `[최종 확정 실패]` and leaves the preview untouched
+   (still confirmable via the same button); a failure in the follow-up
+   preview-status update alone still reports success, since the
+   authoritative decision already exists safely.
+2. **Decision source snapshots** (`app/database.py`): `template_decisions`
+   gained `source_id_snapshot`/`sender_or_region_snapshot`/
+   `sent_at_snapshot`/`original_body_snapshot`, populated from the
+   `messages` row at confirmation time, with an automatic `ALTER TABLE`
+   migration (`Database._migrate_schema`) for databases created before
+   these columns existed. The message → confirmed-template training pair
+   now survives message retention cleanup with its full original text
+   intact, not just a `message_id`.
+3. **Active-preview / supersede policy** (`app/database.py::
+   supersede_active_previews`, `app/template_flow.py`): selecting a new
+   template, or a successful AI generation, marks the previously-active
+   preview (`rule_preview`/`ai_preview`) for that `(message_id,
+   selected_by)` as `superseded`. Confirm/cancel/AI on a superseded,
+   cancelled, or failed preview now replies `[사용할 수 없는 초안]` instead
+   of silently no-opping. A failed AI attempt does not supersede the
+   source Rule preview.
+4. **Stronger AI value/evidence validation**
+   (`app/ai_client.py::_value_supported_by_evidence`): the returned value
+   must now be a normalized substring of its own evidence (not merely
+   "evidence exists somewhere in the message") — `value="한강"` next to
+   `evidence="중랑천에 홍수주의보가 발령되었습니다"` now correctly fails.
+   List-like values are split conservatively and each item checked against
+   the evidence or the full message; a pure time value gets deterministic
+   normalization (`18:00` == `18시`) with no semantic inference.
+
+### Automated test result
+
+```
+$ python -m pytest -q
+307 passed in 5.10s
+
+$ ruff check app tests
+All checks passed!
+```
+
+`ruff format --check app tests` reports the same 36 pre-existing files as
+before this branch (unrelated to these changes — verified via
+`git stash`/re-check); no new formatting drift was introduced, and a
+repo-wide reformat was out of scope for this task.
+
+### Controlled local validation (mocked Telegram/OpenAI, real SQLite)
+
+Ran the section-8 scripted flow end-to-end against a temporary on-disk
+SQLite database (not a live Telegram chat):
+
+```
+1. source message                          -> stored, message_id=1
+2. select template                          -> rule preview_id=1, status=rule_preview
+3. Rule preview shown                       -> "[템플릿 초안]..." sent
+4. select another template                  -> second preview_id=2 created
+5. first preview becomes superseded         -> preview 1 status=superseded
+6. old preview confirmation is rejected     -> "[사용할 수 없는 초안]"
+7. latest preview confirms successfully     -> "[최종 확정 완료]"
+8. decision row contains source snapshots   -> source_id/sender/sent_at/body all present
+9. cleanup removes the source message       -> messages remaining=0
+10. decision still has the original body    -> original_body_snapshot intact after cleanup
+11. mismatched AI value/evidence rejected   -> status=validation_failed
+```
+
+All 11 steps passed. Live Telegram button-clicks and live OpenAI calls were
+still not exercised this session (mocks only, per the operator's earlier
+"merge now, mocks-only" decision for the base Service v1 PR) — see the
+final report for current status.

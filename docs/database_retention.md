@@ -86,7 +86,15 @@ cheap even at a year's retention.
 
 - A confirmed `template_decisions` row is the future automation ground
   truth (see `docs/service_v1.md`) and must outlive the source message's
-  own retention window, not just the same 90 days.
+  own retention window, not just the same 90 days. Since v1.1, the row also
+  carries an immutable snapshot of the source message at confirmation time
+  (`source_id_snapshot`, `sender_or_region_snapshot`, `sent_at_snapshot`,
+  `original_body_snapshot`) — populated by every `upsert_decision()` call —
+  so even the **full original text** survives message deletion, not merely
+  a `message_id` that would otherwise point at nothing. A database created
+  before these columns existed gets them added automatically via
+  `ALTER TABLE` on startup (`Database._migrate_schema`); pre-existing rows
+  simply have `NULL` snapshots.
 - Their `message_id` columns are declared as **plain indexed integers, not
   `REFERENCES messages(internal_id)` foreign keys** (see the module
   docstring in `app/database.py`). `PRAGMA foreign_keys=ON` is on for
@@ -94,8 +102,12 @@ cheap even at a year's retention.
   `cleanup_execute()` raise `FOREIGN KEY constraint failed` the first time
   it tried to delete a message that already had a decision — exactly the
   scenario this table exists to survive. `tests/test_database.py::
-  test_confirmed_decision_survives_message_retention_cleanup` is the
-  regression guard for this.
+  test_confirmed_decision_survives_message_retention_cleanup` and
+  `tests/test_template_flow.py::test_confirmed_decision_contains_source_snapshots`
+  are the regression guards for this (the latter also asserts the full
+  original body is still readable off the decision row after cleanup).
+  `tests/test_database.py::test_snapshot_columns_migrate_onto_pre_change_schema`
+  guards the `ALTER TABLE` migration itself against a pre-change database.
 - If you need to prune these tables too (e.g. for storage on a long-running
   deployment), do it explicitly and separately — there is no
   `TEMPLATE_*_RETENTION_DAYS` setting in Service v1 by design; add one only

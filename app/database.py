@@ -175,7 +175,11 @@ CREATE TABLE IF NOT EXISTS template_decisions (
     final_rendered_text TEXT NOT NULL,
     generation_method TEXT NOT NULL,
     confirmed_by INTEGER NOT NULL,
-    confirmed_at TEXT NOT NULL
+    confirmed_at TEXT NOT NULL,
+    source_id_snapshot TEXT,
+    sender_or_region_snapshot TEXT,
+    sent_at_snapshot TEXT,
+    original_body_snapshot TEXT
 );
 
 -- One row per "AI로 작성" attempt (never stores the API key).
@@ -269,6 +273,26 @@ class Database:
         self._conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
+        self._conn.commit()
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """`CREATE TABLE IF NOT EXISTS` only helps brand-new databases; a
+        database created before the decision-snapshot columns existed needs
+        them added explicitly. Existing rows get NULL snapshots; every newly
+        confirmed decision always populates all four columns."""
+        existing_columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(template_decisions)").fetchall()
+        }
+        snapshot_columns = (
+            "source_id_snapshot",
+            "sender_or_region_snapshot",
+            "sent_at_snapshot",
+            "original_body_snapshot",
+        )
+        for column in snapshot_columns:
+            if column not in existing_columns:
+                self._conn.execute(f"ALTER TABLE template_decisions ADD COLUMN {column} TEXT")
         self._conn.commit()
 
     def close(self) -> None:
@@ -855,6 +879,21 @@ class Database:
             ),
         )
 
+    def supersede_active_previews(self, *, message_id: int, selected_by: int) -> None:
+        """Mark any existing active preview (rule_preview/ai_preview) for the
+        same message_id+selected_by as superseded, so its confirm/cancel
+        buttons stop being honored once a newer preview exists. Confirmed,
+        cancelled, failed, and already-superseded rows are left untouched."""
+        now = datetime.now(tz=SEOUL_TZ).isoformat()
+        self._execute_write(
+            """
+            UPDATE template_previews
+            SET status = 'superseded', updated_at = ?
+            WHERE message_id = ? AND selected_by = ? AND status IN ('rule_preview', 'ai_preview')
+            """,
+            (now, message_id, selected_by),
+        )
+
     # -- template decisions (authoritative ground truth) ---------------------
 
     def upsert_decision(
@@ -867,14 +906,26 @@ class Database:
         final_rendered_text: str,
         generation_method: str,
         confirmed_by: int,
+        source_id_snapshot: str | None = None,
+        sender_or_region_snapshot: str | None = None,
+        sent_at_snapshot: str | None = None,
+        original_body_snapshot: str | None = None,
     ) -> int:
+        """Write the authoritative decision, including an immutable snapshot of
+        the source message at confirmation time (source_id/sender-region/
+        sent_at/original_body) so the training pair survives the source
+        `messages` row being deleted by retention cleanup. Reconfirming a
+        different preview for the same message updates this row (and its
+        snapshots) in place — see docs/database_retention.md."""
         now = datetime.now(tz=SEOUL_TZ).isoformat()
         cur = self._execute_write(
             """
             INSERT INTO template_decisions (
                 message_id, preview_id, final_template_id, final_slots_json,
-                final_rendered_text, generation_method, confirmed_by, confirmed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                final_rendered_text, generation_method, confirmed_by, confirmed_at,
+                source_id_snapshot, sender_or_region_snapshot, sent_at_snapshot,
+                original_body_snapshot
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(message_id) DO UPDATE SET
                 preview_id = excluded.preview_id,
                 final_template_id = excluded.final_template_id,
@@ -882,7 +933,11 @@ class Database:
                 final_rendered_text = excluded.final_rendered_text,
                 generation_method = excluded.generation_method,
                 confirmed_by = excluded.confirmed_by,
-                confirmed_at = excluded.confirmed_at
+                confirmed_at = excluded.confirmed_at,
+                source_id_snapshot = excluded.source_id_snapshot,
+                sender_or_region_snapshot = excluded.sender_or_region_snapshot,
+                sent_at_snapshot = excluded.sent_at_snapshot,
+                original_body_snapshot = excluded.original_body_snapshot
             """,
             (
                 message_id,
@@ -893,6 +948,10 @@ class Database:
                 generation_method,
                 confirmed_by,
                 now,
+                source_id_snapshot,
+                sender_or_region_snapshot,
+                sent_at_snapshot,
+                original_body_snapshot,
             ),
         )
         if cur.lastrowid:

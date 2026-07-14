@@ -184,6 +184,101 @@ def test_successful_extraction_returns_succeeded_with_slots(make_settings):
     assert result.output_tokens == 17
 
 
+# --- value/evidence validation (must prove the value came FROM the evidence,
+# not merely that the evidence text exists somewhere in the message) --------
+
+
+def test_wrong_river_with_valid_evidence_is_rejected(make_settings):
+    settings = make_settings(ai_enabled=True, openai_api_key="sk-test")
+    # "예천천에" is real, in-message evidence, but attached to the wrong river.
+    client = FakeClient(
+        completion=_completion(
+            slots=[
+                _slot_entry("기준시각", "15시", "15시 부로"),
+                _slot_entry("하천명", "한강", "예천천에"),
+            ]
+        )
+    )
+    result = _call(client, settings)
+    assert result.status == "validation_failed"
+    assert "하천명" in result.error
+
+
+def test_wrong_region_with_valid_evidence_is_rejected(make_settings):
+    settings = make_settings(ai_enabled=True, openai_api_key="sk-test")
+    message = "강남구와 서초구 일대에 호우주의보가 발효되었습니다."
+    client = FakeClient(
+        completion=_completion(slots=[_slot_entry("구역", "송파구", "강남구와 서초구 일대에")])
+    )
+    result = _call(
+        client, settings, message_text=message, required_slots=["구역"], optional_slots=[]
+    )
+    assert result.status == "validation_failed"
+    assert "구역" in result.error
+
+
+def test_value_absent_from_evidence_is_rejected(make_settings):
+    settings = make_settings(ai_enabled=True, openai_api_key="sk-test")
+    client = FakeClient(
+        completion=_completion(
+            slots=[
+                _slot_entry("기준시각", "16시", "15시 부로"),
+                _slot_entry("하천명", "예천천", "예천천에"),
+            ]
+        )
+    )
+    result = _call(client, settings)
+    assert result.status == "validation_failed"
+    assert "기준시각" in result.error
+
+
+def test_time_value_accepted_via_normalized_equivalence(make_settings):
+    settings = make_settings(ai_enabled=True, openai_api_key="sk-test")
+    # "15:00" vs "15시 부로" — only whitespace/leading-zero/':' vs '시'
+    # normalization, no semantic inference; must be accepted.
+    client = FakeClient(
+        completion=_completion(
+            slots=[
+                _slot_entry("기준시각", "15:00", "15시 부로"),
+                _slot_entry("하천명", "예천천", "예천천에"),
+            ]
+        )
+    )
+    result = _call(client, settings)
+    assert result.status == "succeeded"
+    assert result.slots["기준시각"].value == "15:00"
+
+
+def test_multi_item_list_value_validated_against_full_message(make_settings):
+    settings = make_settings(ai_enabled=True, openai_api_key="sk-test")
+    message = "강남구, 서초구 지역에 순차적으로 호우주의보가 발효되었습니다. 강남구는 오늘 15시 기준입니다."
+    # Evidence only names 강남구; 서초구 is validated against the full
+    # message text instead (list-item exception), per spec section 5.
+    client = FakeClient(
+        completion=_completion(
+            slots=[_slot_entry("구역", "강남구, 서초구", "강남구는 오늘 15시 기준입니다")]
+        )
+    )
+    result = _call(
+        client, settings, message_text=message, required_slots=["구역"], optional_slots=[]
+    )
+    assert result.status == "succeeded"
+
+
+def test_correct_value_evidence_pair_is_accepted(make_settings):
+    settings = make_settings(ai_enabled=True, openai_api_key="sk-test")
+    client = FakeClient(
+        completion=_completion(
+            slots=[
+                _slot_entry("기준시각", "15시", "15시 부로"),
+                _slot_entry("하천명", "예천천", "예천천에"),
+            ]
+        )
+    )
+    result = _call(client, settings)
+    assert result.status == "succeeded"
+
+
 def test_client_constructed_with_configured_timeout_and_retries(make_settings, monkeypatch):
     settings = make_settings(
         ai_enabled=True, openai_api_key="sk-test", openai_timeout_seconds=12.5, openai_max_retries=4

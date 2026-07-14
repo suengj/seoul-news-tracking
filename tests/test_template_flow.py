@@ -207,6 +207,99 @@ def test_selecting_a_different_template_creates_a_new_preview(db, stored_message
     assert previews[1]["selected_template_id"] == "FLOOD_ADVISORY_ISSUED"
 
 
+# --- preview lifecycle: latest-preview-only / supersede policy ----------------
+
+
+def test_new_selection_supersedes_prior_active_preview(db, stored_message_id, make_settings):
+    settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
+    sender = FakeSender()
+    dispatch_callback(
+        db, settings, sender, _tpl_callback(stored_message_id, "HEAVY_RAIN_CLEARED", cbq_id="c1")
+    )
+    first_preview_id = db._conn.execute(
+        "SELECT preview_id FROM template_previews"
+    ).fetchone()["preview_id"]
+
+    dispatch_callback(
+        db, settings, sender, _tpl_callback(stored_message_id, "FLOOD_ADVISORY_ISSUED", cbq_id="c2")
+    )
+
+    first = db.get_preview(first_preview_id)
+    assert first.status == "superseded"
+
+
+def test_superseded_preview_cannot_be_confirmed(db, stored_message_id, make_settings):
+    settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
+    sender = FakeSender()
+    dispatch_callback(
+        db, settings, sender, _tpl_callback(stored_message_id, "HEAVY_RAIN_CLEARED", cbq_id="c1")
+    )
+    first_preview_id = db._conn.execute(
+        "SELECT preview_id FROM template_previews"
+    ).fetchone()["preview_id"]
+    dispatch_callback(
+        db, settings, sender, _tpl_callback(stored_message_id, "FLOOD_ADVISORY_ISSUED", cbq_id="c2")
+    )
+
+    dispatch_callback(db, settings, sender, _preview_callback(first_preview_id, "confirm"))
+
+    assert "[사용할 수 없는 초안]" in sender.sent_texts[-1]
+    assert db._conn.execute("SELECT COUNT(*) AS c FROM template_decisions").fetchone()["c"] == 0
+
+
+def test_superseded_preview_cannot_be_cancelled(db, stored_message_id, make_settings):
+    settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
+    sender = FakeSender()
+    dispatch_callback(
+        db, settings, sender, _tpl_callback(stored_message_id, "HEAVY_RAIN_CLEARED", cbq_id="c1")
+    )
+    first_preview_id = db._conn.execute(
+        "SELECT preview_id FROM template_previews"
+    ).fetchone()["preview_id"]
+    dispatch_callback(
+        db, settings, sender, _tpl_callback(stored_message_id, "FLOOD_ADVISORY_ISSUED", cbq_id="c2")
+    )
+
+    dispatch_callback(db, settings, sender, _preview_callback(first_preview_id, "cancel"))
+
+    assert "[사용할 수 없는 초안]" in sender.sent_texts[-1]
+    preview = db.get_preview(first_preview_id)
+    assert preview.status == "superseded"  # unchanged, not "cancelled"
+
+
+def test_confirmed_preview_cannot_be_cancelled(db, stored_message_id, make_settings):
+    settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
+    sender = FakeSender()
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "HEAVY_RAIN_CLEARED"))
+    preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()["preview_id"]
+    dispatch_callback(db, settings, sender, _preview_callback(preview_id, "confirm", cbq_id="ok-1"))
+
+    dispatch_callback(db, settings, sender, _preview_callback(preview_id, "cancel", cbq_id="cancel-1"))
+
+    assert "[사용할 수 없는 초안]" in sender.sent_texts[-1]
+    assert db.get_preview(preview_id).status == "confirmed"
+    assert db._conn.execute("SELECT COUNT(*) AS c FROM template_decisions").fetchone()["c"] == 1
+
+
+def test_latest_preview_remains_usable_after_supersede(db, stored_message_id, make_settings):
+    settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
+    sender = FakeSender()
+    dispatch_callback(
+        db, settings, sender, _tpl_callback(stored_message_id, "HEAVY_RAIN_CLEARED", cbq_id="c1")
+    )
+    dispatch_callback(
+        db, settings, sender, _tpl_callback(stored_message_id, "ORIGINAL_ONLY", cbq_id="c2")
+    )
+    latest_preview_id = db._conn.execute(
+        "SELECT preview_id FROM template_previews ORDER BY preview_id DESC LIMIT 1"
+    ).fetchone()["preview_id"]
+
+    dispatch_callback(db, settings, sender, _preview_callback(latest_preview_id, "confirm"))
+
+    decision = db._conn.execute("SELECT * FROM template_decisions").fetchone()
+    assert decision["final_template_id"] == "ORIGINAL_ONLY"
+
+
 # --- preview confirm ----------------------------------------------------------
 
 
@@ -258,6 +351,73 @@ def test_confirm_rejected_when_preview_incomplete(db, stored_message_id, make_se
     assert db._conn.execute("SELECT COUNT(*) AS c FROM template_decisions").fetchone()["c"] == 0
     # No confirmation message appended beyond the original incomplete preview.
     assert len(sender.sent_texts) == 1
+
+
+def test_confirm_db_failure_sends_failure_message_and_keeps_preview_retryable(
+    db, stored_message_id, make_settings, monkeypatch
+):
+    settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
+    sender = FakeSender()
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "HEAVY_RAIN_CLEARED"))
+    preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()["preview_id"]
+
+    monkeypatch.setattr(
+        db, "upsert_decision", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disk full"))
+    )
+    dispatch_callback(db, settings, sender, _preview_callback(preview_id, "confirm", cbq_id="fail-1"))
+
+    assert "[최종 확정 실패]" in sender.sent_texts[-1]
+    assert db._conn.execute("SELECT COUNT(*) AS c FROM template_decisions").fetchone()["c"] == 0
+    preview = db._conn.execute(
+        "SELECT status FROM template_previews WHERE preview_id = ?", (preview_id,)
+    ).fetchone()
+    assert preview["status"] == "rule_preview"  # untouched — still confirmable
+
+    # Retry (DB restored) succeeds without needing a fresh preview.
+    monkeypatch.undo()
+    dispatch_callback(db, settings, sender, _preview_callback(preview_id, "confirm", cbq_id="fail-2"))
+    assert "[최종 확정 완료]" in sender.sent_texts[-1]
+    assert db._conn.execute("SELECT COUNT(*) AS c FROM template_decisions").fetchone()["c"] == 1
+
+
+def test_confirm_status_update_failure_still_reports_success_since_decision_is_safe(
+    db, stored_message_id, make_settings, monkeypatch
+):
+    settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
+    sender = FakeSender()
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "HEAVY_RAIN_CLEARED"))
+    preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()["preview_id"]
+
+    monkeypatch.setattr(
+        db, "update_preview_status", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("locked"))
+    )
+    dispatch_callback(db, settings, sender, _preview_callback(preview_id, "confirm"))
+
+    # The authoritative decision exists — never claim a failed confirmation
+    # just because the (non-authoritative) preview bookkeeping update failed.
+    assert "[최종 확정 완료]" in sender.sent_texts[-1]
+    assert db._conn.execute("SELECT COUNT(*) AS c FROM template_decisions").fetchone()["c"] == 1
+
+
+def test_confirmed_decision_contains_source_snapshots(db, stored_message_id, make_settings):
+    settings = make_settings(telegram_allowed_user_ids=(ALLOWED_USER_ID,))
+    sender = FakeSender()
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "HEAVY_RAIN_CLEARED"))
+    preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()["preview_id"]
+    dispatch_callback(db, settings, sender, _preview_callback(preview_id, "confirm"))
+
+    decision = db._conn.execute("SELECT * FROM template_decisions").fetchone()
+    assert decision["source_id_snapshot"] == "DS1"
+    assert decision["sender_or_region_snapshot"] == "예천군"
+    assert decision["sent_at_snapshot"]
+    assert "호우주의보가 해제되었습니다" in decision["original_body_snapshot"]
+
+    # Survives the source message being deleted by retention cleanup.
+    db.cleanup_execute(message_retention_days=0, run_history_retention_days=14, tombstone_retention_days=365)
+    assert db._conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"] == 0
+    row = db.get_decision_by_message_id(stored_message_id)
+    assert row is not None
+    assert "호우주의보가 해제되었습니다" in row["original_body_snapshot"]
 
 
 def test_duplicate_confirm_callback_processed_only_once(db, stored_message_id, make_settings):
@@ -371,12 +531,51 @@ def test_ai_failure_keeps_original_preview_and_allows_cancel(
     assert ai_gen["status"] == "validation_failed"
     # No new preview row for a failed AI attempt.
     assert db._conn.execute("SELECT COUNT(*) AS c FROM template_previews").fetchone()["c"] == 1
+    # The Rule preview is left active, not superseded — a failed AI call
+    # must not block confirming/cancelling the original Rule preview.
+    assert db.get_preview(preview_id).status == "rule_preview"
 
     text = sender.sent_texts[-1]
     assert "[템플릿 작성 미완료]" in text
     labels = _labels(sender.sent_keyboards[-1])
     assert "✅ 최종 OK" not in labels
     assert "↩️ 취소" in labels
+
+    # Still confirmable via a fresh AI attempt / cancel afterward — proven by
+    # cancel succeeding normally (not rejected as stale).
+    dispatch_callback(db, settings, sender, _preview_callback(preview_id, "cancel", cbq_id="cancel-after-ai-fail"))
+    assert "[선택 취소]" in sender.sent_texts[-1]
+
+
+def test_successful_ai_preview_supersedes_rule_preview(
+    db, stored_message_id, make_settings, monkeypatch
+):
+    settings = make_settings(
+        telegram_allowed_user_ids=(ALLOWED_USER_ID,), ai_enabled=True, openai_api_key="sk-test"
+    )
+    sender = FakeSender()
+    dispatch_callback(db, settings, sender, _tpl_callback(stored_message_id, "FLOOD_ADVISORY_ISSUED"))
+    rule_preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()["preview_id"]
+
+    def _fake_generate_slots(**kwargs):
+        return AIGenerationResult(
+            status="succeeded",
+            slots={
+                "기준시각": SlotValue(value="15시", source="ai", evidence="15시 부로", confidence=0.7),
+                "하천명": SlotValue(value="예천천", source="ai", evidence="예천천", confidence=0.7),
+            },
+        )
+
+    monkeypatch.setattr("app.template_flow.generate_slots", _fake_generate_slots)
+    dispatch_callback(db, settings, sender, _preview_callback(rule_preview_id, "ai"))
+
+    assert db.get_preview(rule_preview_id).status == "superseded"
+
+    # The old Rule preview's own buttons no longer work.
+    dispatch_callback(
+        db, settings, sender, _preview_callback(rule_preview_id, "confirm", cbq_id="stale-confirm")
+    )
+    assert "[사용할 수 없는 초안]" in sender.sent_texts[-1]
 
 
 def test_ai_preview_confirm_records_ai_generation_method(

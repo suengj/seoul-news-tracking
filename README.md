@@ -138,9 +138,12 @@ informational only), `template_actions` (one row per selection button
 press), `template_previews` (one row per shown preview — the addressable
 object confirm/cancel/AI act on), `template_decisions` (one row per
 message, `UPSERT`ed only by an explicit ✅ 최종 OK — the authoritative
-result), `ai_generations` (one row per on-demand AI attempt, never the API
-key). The last three are never pruned by retention cleanup, even after
-their source `messages` row is deleted.
+result, including an immutable snapshot of the source message's
+id/sender-region/sent-time/full body at confirmation time), `ai_generations`
+(one row per on-demand AI attempt, never the API key). The last three are
+never pruned by retention cleanup, even after their source `messages` row
+is deleted — and `template_decisions`' own snapshot means the full original
+text is never lost either.
 
 ## Project layout
 
@@ -164,6 +167,9 @@ tests/          fixture/mock-based tests, no live network dependency
 
 See `docs/service_v1.md` and `docs/local_runtime.md` for the full list.
 Notably: no server/VPS deployment yet (long-polling only, single local
-SQLite file), live AI extraction is validated with mocks only until a real
-`OPENAI_API_KEY` is supplied, and exactly-one-active-preview isn't
-hard-enforced (an older preview's buttons remain technically clickable).
+SQLite file), and live AI extraction is validated with mocks only until a
+real `OPENAI_API_KEY` is supplied. Only the latest preview per
+(message, operator) is confirmable/cancellable — selecting a new template,
+or a successful AI generation, marks the prior active preview `superseded`;
+acting on a stale preview's buttons is rejected, never silently ignored
+(see `docs/telegram_template_flow.md`).

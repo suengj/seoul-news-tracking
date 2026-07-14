@@ -224,7 +224,7 @@ def test_send_plain_text_attaches_keyboard_only_to_last_chunk(make_settings):
 def test_make_and_parse_callback_data_roundtrip():
     data = make_callback_data(42, "HEAVY_RAIN_CLEARED")
     assert len(data.encode("utf-8")) <= 64
-    assert parse_callback_data(data) == (42, "HEAVY_RAIN_CLEARED")
+    assert parse_callback_data(data) == (42, "HW-05")
 
 
 def test_parse_callback_data_rejects_malformed():
@@ -248,13 +248,13 @@ def test_parse_preview_callback_data_rejects_malformed():
 # --- Service v1: keyboard / message builders ---------------------------------
 
 
-def test_build_selection_keyboard_has_eight_buttons_no_primary_recommendation():
+def test_build_selection_keyboard_is_two_stage_category_menu():
     keyboard = build_selection_keyboard(message_id=1)
     rows = keyboard["inline_keyboard"]
     all_buttons = [button for row in rows for button in row]
-    assert len(all_buttons) == 8
+    assert len(all_buttons) == 5
     labels = {button["text"] for button in all_buttons}
-    assert "📄 원문" in labels
+    assert labels == {"☔ 호우", "🔥 폭염", "🌙 열대야", "🌊 홍수", "📄 원문"}
     # No button text implies an automatic recommendation.
     assert not any("추천" in label for label in labels)
 
@@ -263,7 +263,7 @@ def test_build_template_alert_message_shows_recommendation_only_as_secondary_lin
     from app.template_rules import TemplateSuggestion
 
     record = make_record(body="오늘 18시 기준 중랑천에 홍수주의보가 발령되었습니다.")
-    recommended = TemplateSuggestion(template_id="FLOOD_ADVISORY_ISSUED", rule_score=1.0)
+    recommended = TemplateSuggestion(template_id="FL-01", rule_score=1.0)
     text = build_template_alert_message(record, recommended)
     assert "사용할 템플릿을 선택해 주세요." in text
     assert "실험적 추천" in text
@@ -281,7 +281,7 @@ def test_build_preview_complete_message_lists_slots_and_rendered_text():
     from app.template_extractors import SlotValue
 
     slots = {"지역": SlotValue(value="서울", source="sender_or_region", evidence="서울", confidence=1.0)}
-    text = build_preview_complete_message("HEAVY_RAIN_CLEARED", "rule", slots, "렌더된 문안")
+    text = build_preview_complete_message("HW-05", "rule", slots, "렌더된 문안")
     assert "[템플릿 초안]" in text
     assert "Rule" in text
     assert "- 지역: 서울" in text
@@ -289,14 +289,14 @@ def test_build_preview_complete_message_lists_slots_and_rendered_text():
 
 
 def test_build_preview_incomplete_message_never_shows_confirm_button_implied():
-    text = build_preview_incomplete_message("FLOOD_ADVISORY_ISSUED", {}, ["하천명"], "원문 내용")
+    text = build_preview_incomplete_message("FL-01", {}, ["하천지점"], "원문 내용")
     assert "[템플릿 작성 미완료]" in text
     assert "누락 필드:" in text
-    assert "하천명" in text
+    assert "하천지점" in text
     assert "원문 내용" in text
 
 
 def test_build_confirmation_message():
-    text = build_confirmation_message("HEAVY_RAIN_CLEARED", "최종 문안입니다")
+    text = build_confirmation_message("HW-05", "최종 문안입니다")
     assert "[최종 확정 완료]" in text
     assert "최종 문안입니다" in text

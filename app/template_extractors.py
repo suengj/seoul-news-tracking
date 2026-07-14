@@ -1,4 +1,4 @@
-"""Deterministic slot extraction for the seven message templates.
+"""Deterministic slot extraction for Excel-catalog templates.
 
 No NLP frameworks, no inference beyond simple regex/dictionary lookups.
 Every extracted value must be traceable to either the original message body,
@@ -229,18 +229,19 @@ def _sent_at_fallback(sent_at: datetime) -> SlotValue:
 # --- per-template extractors -------------------------------------------------
 
 
-def _extract_flood_advisory_issued(
+def _extract_flood_advisory(
     message_text: str, sender_or_region: str, sent_at: datetime
 ) -> ExtractionResult:
-    required = ["기준시각", "하천명"]
+    """FL-01 — Excel slots: 기준일시, 하천지점."""
+    required = ["기준일시", "하천지점"]
     slots: dict[str, SlotValue] = {}
     if (v := _extract_time_anchor(message_text)) is not None:
-        slots["기준시각"] = v
+        slots["기준일시"] = v
     if (v := _extract_river_name(message_text)) is not None:
-        slots["하천명"] = v
+        slots["하천지점"] = v
     missing = _missing(required, slots)
     return ExtractionResult(
-        template_id="FLOOD_ADVISORY_ISSUED",
+        template_id="FL-01",
         extracted_slots=slots,
         required_slots_complete=not missing,
         missing_required_slots=missing,
@@ -250,15 +251,16 @@ def _extract_flood_advisory_issued(
 def _extract_heavy_rain_cleared(
     message_text: str, sender_or_region: str, sent_at: datetime
 ) -> ExtractionResult:
-    required = ["지역", "해제시각"]
+    """HW-05 — Excel slots: 지역, 해제일시."""
+    required = ["지역", "해제일시"]
     slots: dict[str, SlotValue] = {}
     if (v := _extract_region(sender_or_region, message_text)) is not None:
         slots["지역"] = v
     if (v := _extract_release_time(message_text)) is not None:
-        slots["해제시각"] = v
+        slots["해제일시"] = v
     missing = _missing(required, slots)
     return ExtractionResult(
-        template_id="HEAVY_RAIN_CLEARED",
+        template_id="HW-05",
         extracted_slots=slots,
         required_slots_complete=not missing,
         missing_required_slots=missing,
@@ -268,6 +270,7 @@ def _extract_heavy_rain_cleared(
 def _extract_heavy_rain_downgraded(
     message_text: str, sender_or_region: str, sent_at: datetime
 ) -> ExtractionResult:
+    """HW-04 — Excel slots: 기준일시, 지역."""
     required = ["기준일시", "지역"]
     slots: dict[str, SlotValue] = {}
     if (v := _extract_time_anchor(message_text)) is not None:
@@ -276,7 +279,7 @@ def _extract_heavy_rain_downgraded(
         slots["지역"] = v
     missing = _missing(required, slots)
     return ExtractionResult(
-        template_id="HEAVY_RAIN_DOWNGRADED",
+        template_id="HW-04",
         extracted_slots=slots,
         required_slots_complete=not missing,
         missing_required_slots=missing,
@@ -286,6 +289,7 @@ def _extract_heavy_rain_downgraded(
 def _extract_heavy_rain_multi_level_issued(
     message_text: str, sender_or_region: str, sent_at: datetime
 ) -> ExtractionResult:
+    """Legacy HEAVY_RAIN_MULTI_LEVEL_ISSUED — kept for old previews only."""
     required = ["지역", "기준시각"]
     slots: dict[str, SlotValue] = {}
     if (v := _extract_region(sender_or_region, message_text)) is not None:
@@ -310,29 +314,31 @@ def _extract_heavy_rain_multi_level_issued(
 def _extract_heatwave_upgraded(
     message_text: str, sender_or_region: str, sent_at: datetime
 ) -> ExtractionResult:
-    required = ["발표일시", "지역"]
+    """HT-03 — Excel slots: 발효일시, 권역수, 상향권역, 유지권역."""
+    required = ["발효일시", "권역수", "상향권역", "유지권역"]
     slots: dict[str, SlotValue] = {}
     if (v := _extract_time_anchor(message_text)) is not None:
-        slots["발표일시"] = v
+        slots["발효일시"] = v
     elif sent_at is not None:
-        slots["발표일시"] = _sent_at_fallback(sent_at)
-    if (v := _extract_region(sender_or_region, message_text)) is not None:
-        slots["지역"] = v
-    maintained = _extract_labeled_region_list(message_text, "유지지역")
-    if maintained is not None:
-        slots["유지지역"] = maintained
+        slots["발효일시"] = _sent_at_fallback(sent_at)
+    # Region list heuristics when labels are present; otherwise leave missing.
+    if (v := _extract_labeled_region_list(message_text, "상향")) is not None:
+        slots["상향권역"] = v
+    if (v := _extract_labeled_region_list(message_text, "유지")) is not None:
+        slots["유지권역"] = v
     missing = _missing(required, slots)
     return ExtractionResult(
-        template_id="HEATWAVE_UPGRADED",
+        template_id="HT-03",
         extracted_slots=slots,
         required_slots_complete=not missing,
         missing_required_slots=missing,
     )
 
 
-def _extract_heatwave_advisory_issued(
+def _extract_heatwave_advisory(
     message_text: str, sender_or_region: str, sent_at: datetime
 ) -> ExtractionResult:
+    """HT-01 — Excel slots: 기준일시, 지역."""
     required = ["기준일시", "지역"]
     slots: dict[str, SlotValue] = {}
     if (v := _extract_time_anchor(message_text)) is not None:
@@ -341,27 +347,28 @@ def _extract_heatwave_advisory_issued(
         slots["지역"] = v
     missing = _missing(required, slots)
     return ExtractionResult(
-        template_id="HEATWAVE_ADVISORY_ISSUED",
+        template_id="HT-01",
         extracted_slots=slots,
         required_slots_complete=not missing,
         missing_required_slots=missing,
     )
 
 
-def _extract_tropical_night_advisory_issued(
+def _extract_tropical_night(
     message_text: str, sender_or_region: str, sent_at: datetime
 ) -> ExtractionResult:
-    required = ["발표일시", "지역"]
+    """TN-01 — Excel slots: 발효일시, 지역."""
+    required = ["발효일시", "지역"]
     slots: dict[str, SlotValue] = {}
     if (v := _extract_time_anchor(message_text)) is not None:
-        slots["발표일시"] = v
+        slots["발효일시"] = v
     elif sent_at is not None:
-        slots["발표일시"] = _sent_at_fallback(sent_at)
+        slots["발효일시"] = _sent_at_fallback(sent_at)
     if (v := _extract_region(sender_or_region, message_text)) is not None:
         slots["지역"] = v
     missing = _missing(required, slots)
     return ExtractionResult(
-        template_id="TROPICAL_NIGHT_ADVISORY_ISSUED",
+        template_id="TN-01",
         extracted_slots=slots,
         required_slots_complete=not missing,
         missing_required_slots=missing,
@@ -382,14 +389,70 @@ def _extract_original_only(
     )
 
 
+def _slot_for_name(
+    name: str, message_text: str, sender_or_region: str, sent_at: datetime
+) -> SlotValue | None:
+    """Conservative generic mapping for the remaining Excel slot names."""
+    if name == "원문":
+        return SlotValue(
+            value=message_text,
+            source="original_message",
+            evidence=message_text[:80],
+            confidence=1.0,
+        )
+    if name in {"지역", "상향권역", "유지권역"} or name.endswith("권역"):
+        if name == "지역":
+            return _extract_region(sender_or_region, message_text)
+        if "유지" in name:
+            return _extract_labeled_region_list(message_text, "유지")
+        if "상향" in name:
+            return _extract_labeled_region_list(message_text, "상향")
+        return _extract_region(sender_or_region, message_text)
+    if "하천" in name:
+        return _extract_river_name(message_text)
+    if "해제" in name:
+        return _extract_release_time(message_text)
+    if any(token in name for token in ("일시", "시각", "시간", "발표", "발효", "기준")):
+        v = _extract_time_anchor(message_text)
+        if v is not None:
+            return v
+        if name in {"발효일시", "발표일시"} and sent_at is not None:
+            return _sent_at_fallback(sent_at)
+        return None
+    return None
+
+
+def _extract_generic(
+    template_id: str,
+    message_text: str,
+    sender_or_region: str,
+    sent_at: datetime,
+    *,
+    required: list[str],
+    optional: list[str],
+) -> ExtractionResult:
+    slots: dict[str, SlotValue] = {}
+    for name in list(required) + list(optional):
+        v = _slot_for_name(name, message_text, sender_or_region, sent_at)
+        if v is not None:
+            slots[name] = v
+    missing = _missing(required, slots)
+    return ExtractionResult(
+        template_id=template_id,
+        extracted_slots=slots,
+        required_slots_complete=not missing,
+        missing_required_slots=missing,
+    )
+
+
 _EXTRACTORS = {
-    "FLOOD_ADVISORY_ISSUED": _extract_flood_advisory_issued,
-    "HEAVY_RAIN_CLEARED": _extract_heavy_rain_cleared,
-    "HEAVY_RAIN_DOWNGRADED": _extract_heavy_rain_downgraded,
+    "FL-01": _extract_flood_advisory,
+    "HW-05": _extract_heavy_rain_cleared,
+    "HW-04": _extract_heavy_rain_downgraded,
     "HEAVY_RAIN_MULTI_LEVEL_ISSUED": _extract_heavy_rain_multi_level_issued,
-    "HEATWAVE_UPGRADED": _extract_heatwave_upgraded,
-    "HEATWAVE_ADVISORY_ISSUED": _extract_heatwave_advisory_issued,
-    "TROPICAL_NIGHT_ADVISORY_ISSUED": _extract_tropical_night_advisory_issued,
+    "HT-03": _extract_heatwave_upgraded,
+    "HT-01": _extract_heatwave_advisory,
+    "TN-01": _extract_tropical_night,
     "ORIGINAL_ONLY": _extract_original_only,
 }
 
@@ -397,13 +460,27 @@ _EXTRACTORS = {
 def extract_slots(
     template_id: str, message_text: str, sender_or_region: str, sent_at: datetime
 ) -> ExtractionResult:
-    extractor = _EXTRACTORS.get(template_id)
-    if extractor is None:
+    from app.template_renderer import get_template, resolve_template_id
+
+    canonical = resolve_template_id(template_id)
+    extractor = _EXTRACTORS.get(canonical)
+    if extractor is not None:
+        return extractor(message_text, sender_or_region, sent_at)
+
+    template = get_template(canonical)
+    if template is None:
         return ExtractionResult(
-            template_id=template_id,
+            template_id=canonical,
             extracted_slots={},
             required_slots_complete=False,
             missing_required_slots=[],
             validation_errors=[f"no extractor registered for template_id={template_id!r}"],
         )
-    return extractor(message_text, sender_or_region, sent_at)
+    return _extract_generic(
+        canonical,
+        message_text,
+        sender_or_region,
+        sent_at,
+        required=template.required_slots,
+        optional=template.optional_slots,
+    )

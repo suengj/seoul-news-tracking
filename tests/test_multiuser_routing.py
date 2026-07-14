@@ -193,7 +193,7 @@ def test_user_b_template_selection_preview_routes_to_user_b_chat(db, settings, m
         db,
         settings,
         sender,
-        _tpl_callback(message_id, "HEAVY_RAIN_CLEARED", user_id=USER_B_ID, chat_id=USER_B_CHAT),
+        _tpl_callback(message_id, "HW-05", user_id=USER_B_ID, chat_id=USER_B_CHAT),
     )
     assert sender.sent_chat_ids == [USER_B_CHAT]
 
@@ -205,7 +205,7 @@ def test_user_b_cancel_routes_to_user_b_chat(db, settings, make_record):
         db,
         settings,
         sender,
-        _tpl_callback(message_id, "HEAVY_RAIN_CLEARED", user_id=USER_B_ID, chat_id=USER_B_CHAT),
+        _tpl_callback(message_id, "HW-05", user_id=USER_B_ID, chat_id=USER_B_CHAT),
     )
     preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
@@ -233,7 +233,7 @@ def test_user_b_confirm_routes_to_user_b_chat(db, settings, make_record):
         db,
         settings,
         sender,
-        _tpl_callback(message_id, "HEAVY_RAIN_CLEARED", user_id=USER_B_ID, chat_id=USER_B_CHAT),
+        _tpl_callback(message_id, "HW-05", user_id=USER_B_ID, chat_id=USER_B_CHAT),
     )
     preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
@@ -256,7 +256,7 @@ def test_user_b_ai_disabled_reply_routes_to_user_b_chat(db, settings, make_recor
         db,
         settings,
         sender,
-        _tpl_callback(message_id, "HEAVY_RAIN_CLEARED", user_id=USER_B_ID, chat_id=USER_B_CHAT),
+        _tpl_callback(message_id, "HW-05", user_id=USER_B_ID, chat_id=USER_B_CHAT),
     )
     preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
@@ -282,7 +282,7 @@ def test_user_a_cannot_confirm_user_b_preview(db, settings, make_record):
         db,
         settings,
         sender,
-        _tpl_callback(message_id, "HEAVY_RAIN_CLEARED", user_id=USER_B_ID, chat_id=USER_B_CHAT),
+        _tpl_callback(message_id, "HW-05", user_id=USER_B_ID, chat_id=USER_B_CHAT),
     )
     preview_id = db._conn.execute("SELECT preview_id FROM template_previews").fetchone()[
         "preview_id"
@@ -385,7 +385,7 @@ def test_callback_with_missing_chat_data_fails_closed(db, settings, make_record)
     callback = {
         "id": "cbq-nochat",
         "from": {"id": USER_A_ID},
-        "data": make_callback_data(message_id, "HEAVY_RAIN_CLEARED"),
+        "data": make_callback_data(message_id, "HW-05"),
     }
     dispatch_callback(db, settings, sender, callback)
 

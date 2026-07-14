@@ -1,3 +1,11 @@
+> **v0.2.0 source-of-truth:** Excel workbook
+> `templates/서울시_재난특보_X템플릿.xlsx` is human-managed.
+> `config/message_templates.yaml` is the generated runtime snapshot
+> (`sync_templates_from_excel --check|--write`). Canonical IDs are
+> Excel codes (`HW-05`, `FL-01`, …). Legacy Service v1 IDs resolve
+> via aliases; `HEAVY_RAIN_MULTI_LEVEL_ISSUED` remains legacy-hidden
+> (no exact Excel alias — `HW-08` has a different meaning).
+
 # Template Recommendation & Extraction Engine
 
 Deterministic template scoring, slot extraction, and rendering. No machine

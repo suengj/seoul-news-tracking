@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-14
+
+### Added
+- Excel workbook (`templates/서울시_재난특보_X템플릿.xlsx`) as the human-managed
+  template catalog source, synchronized into `config/message_templates.yaml`
+  via `python -m app.commands.sync_templates_from_excel --check|--write`.
+- Version-2 YAML catalog: 21 business templates (19 automation + 2 reference),
+  plus isolated `system_templates` / `legacy_templates` sections.
+- Two-stage Telegram selection menus (category → template) with `cat:` /
+  `tpl:` / `back:` callbacks.
+- Canonical ID resolver for historical Service v1 aliases
+  (`HEAVY_RAIN_CLEARED` → `HW-05`, etc.).
+- Preview badge `⚠️ 부서 검수 필요` for `review_required` templates.
+
+### Changed
+- Runtime wording now comes from the generated Excel snapshot (exact workbook
+  text, URLs, and spacing preserved).
+- Selection keyboards derive labels and category membership from YAML rather
+  than a hardcoded 8-button layout.
+
 ## [0.1.1] - 2026-07-14
 
 ### Fixed

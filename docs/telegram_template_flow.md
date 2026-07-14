@@ -5,6 +5,18 @@ wired over Telegram. See `docs/service_v1.md` for the product-level
 picture and `docs/template_engine.md` for the rule/extraction/rendering
 logic itself.
 
+## Excel catalog (v0.2.0)
+
+Business templates come from `templates/서울시_재난특보_X템플릿.xlsx`
+and are generated into `config/message_templates.yaml` with
+`python -m app.commands.sync_templates_from_excel --write`.
+The live bot never opens the workbook; it only loads the YAML.
+
+Initial keyboard is two-stage:
+1. Category buttons (`cat:{message_id}:HW|HT|TN|FL`) + `📄 원문`
+2. Per-category automation templates (`tpl:{message_id}:HW-01`, …)
+   with `← 뒤로` (`back:{message_id}`) and `📄 원문`
+
 ## One bot process, one offset sequence
 
 `python -m app.commands.run_telegram_bot` runs a single `getUpdates`

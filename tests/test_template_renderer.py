@@ -8,26 +8,29 @@ def _slot(value: str, source: str = "message_body") -> SlotValue:
     return SlotValue(value=value, source=source, evidence=value, confidence=1.0)
 
 
-def test_all_nine_templates_load():
+def test_catalog_and_system_templates_load():
     templates = load_templates()
     expected = {
-        "FLOOD_ADVISORY_ISSUED",
-        "HEAVY_RAIN_CLEARED",
-        "HEAVY_RAIN_DOWNGRADED",
+        "HW-01",
+        "FL-01",
+        "HT-01",
+        "TN-01",
+        "REF-01",
+        "REF-02",
         "HEAVY_RAIN_MULTI_LEVEL_ISSUED",
-        "HEATWAVE_UPGRADED",
-        "HEATWAVE_ADVISORY_ISSUED",
-        "TROPICAL_NIGHT_ADVISORY_ISSUED",
         "ORIGINAL_ONLY",
         "UNKNOWN",
     }
     assert expected <= set(templates)
+    assert templates["REF-01"].enabled is False
+    assert templates["REF-01"].automation is False
+    assert len([t for t in templates.values() if t.automation and t.enabled]) == 19
 
 
 def test_render_preserves_emoji_and_line_breaks():
     result = render_template(
-        "FLOOD_ADVISORY_ISSUED",
-        {"기준시각": _slot("14:00"), "하천명": _slot("도림천")},
+        "FL-01",
+        {"기준일시": _slot("14:00"), "하천지점": _slot("도림천")},
     )
     assert result.success
     assert "📢 홍수주의보 발효 안내" in result.rendered_text
@@ -36,14 +39,14 @@ def test_render_preserves_emoji_and_line_breaks():
 
 
 def test_render_fails_on_missing_required_slot():
-    result = render_template("FLOOD_ADVISORY_ISSUED", {"기준시각": _slot("14:00")})
+    result = render_template("FL-01", {"기준일시": _slot("14:00")})
     assert not result.success
-    assert result.missing_slots == ["하천명"]
+    assert result.missing_slots == ["하천지점"]
     assert result.rendered_text is None
 
 
 def test_render_never_leaves_unresolved_required_placeholder():
-    result = render_template("HEAVY_RAIN_CLEARED", {})
+    result = render_template("HW-05", {})
     assert not result.success
     assert "{" not in (result.rendered_text or "")
 
@@ -94,29 +97,28 @@ def test_all_three_multi_level_headings_omitted_when_all_absent():
     assert "호우주의보" not in result.rendered_text
 
 
-def test_heatwave_upgraded_maintained_region_sentence_is_yaml_owned():
-    # The extractor only ever returns the raw 유지지역 value (see
-    # app/template_extractors.py) — the fixed sentence lives entirely in
-    # the YAML template's conditional block.
+def test_heatwave_upgraded_renders_exact_workbook_wording():
     result = render_template(
-        "HEATWAVE_UPGRADED",
+        "HT-03",
         {
-            "발표일시": _slot("18:00"),
-            "지역": _slot("서울특별시"),
-            "유지지역": _slot("강남구"),
+            "발효일시": _slot("18:00"),
+            "권역수": _slot("3"),
+            "상향권역": _slot("강북구"),
+            "유지권역": _slot("강남구"),
         },
     )
     assert result.success
-    assert "강남구은(는) 폭염주의보가 유지됩니다." in result.rendered_text
+    assert "폭염주의보에서 폭염경보로 상향" in result.rendered_text
+    assert "강남구" in result.rendered_text
+    assert "http://safecity.seoul.go.kr" in result.rendered_text
 
 
-def test_heatwave_upgraded_omits_maintained_block_when_absent():
+def test_heatwave_upgraded_fails_when_required_slots_missing():
     result = render_template(
-        "HEATWAVE_UPGRADED", {"발표일시": _slot("18:00"), "지역": _slot("서울특별시")}
+        "HT-03", {"발효일시": _slot("18:00"), "권역수": _slot("3")}
     )
-    assert result.success
-    assert "유지됩니다" not in result.rendered_text
-    assert "{" not in result.rendered_text
+    assert not result.success
+    assert "상향권역" in result.missing_slots
 
 
 def test_unknown_template_id_is_rejected():
@@ -134,3 +136,11 @@ def test_original_only_passes_body_through_unaltered():
 
 def test_get_template_returns_none_for_unknown_id():
     assert get_template("NOPE") is None
+
+
+def test_resolve_legacy_alias_and_canonical():
+    from app.template_renderer import resolve_template_id
+
+    assert resolve_template_id("HEAVY_RAIN_CLEARED") == "HW-05"
+    assert resolve_template_id("HW-05") == "HW-05"
+    assert get_template("HEAVY_RAIN_CLEARED").id == "HW-05"

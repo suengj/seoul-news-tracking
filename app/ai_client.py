@@ -64,6 +64,57 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+# Conservative delimiters for splitting a list-like value ("중랑천, 안양천")
+# into individual items. Deliberately narrow — no free-form word splitting.
+_LIST_DELIMITER_RE = re.compile(r"[,/、·]|\s+및\s+")
+
+# A value/evidence fragment that is *only* a time expression: "18시",
+# "18:00", "6시 30분". Leading-zero and ':'-vs-'시' are the only
+# normalizations allowed — no semantic inference beyond that.
+_TIME_VALUE_RE = re.compile(r"^\s*\d{1,2}\s*(?::\s*\d{1,2}|시\s*(?:\d{1,2}\s*분)?)\s*$")
+_TIME_SEARCH_RE = re.compile(r"(\d{1,2})\s*(?::\s*(\d{1,2})|시\s*(?:(\d{1,2})\s*분)?)")
+
+
+def _split_list_value(value: str) -> list[str]:
+    return [part.strip() for part in _LIST_DELIMITER_RE.split(value) if part.strip()]
+
+
+def _extract_time(text: str) -> tuple[int, int] | None:
+    match = _TIME_SEARCH_RE.search(text)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2) or match.group(3) or "0")
+    return hour, minute
+
+
+def _value_supported_by_evidence(value: str, evidence: str, message_text: str) -> bool:
+    """The minimum proof that `value` actually came from `evidence` (not just
+    that `evidence` happens to appear in the message). Scalar values must be
+    a normalized substring of the evidence; list-like values are split
+    conservatively and each item checked against the evidence or the full
+    message; a pure time expression may match via deterministic time
+    normalization (whitespace/leading-zero/`:` vs `시`) instead of exact text.
+    """
+    if _TIME_VALUE_RE.match(value):
+        value_time = _extract_time(value)
+        evidence_time = _extract_time(evidence)
+        if value_time is not None and value_time == evidence_time:
+            return True
+
+    normalized_evidence = _normalize(evidence)
+
+    items = _split_list_value(value)
+    if len(items) > 1:
+        normalized_message = _normalize(message_text)
+        return all(
+            _normalize(item) in normalized_evidence or _normalize(item) in normalized_message
+            for item in items
+        )
+
+    return _normalize(value) in normalized_evidence
+
+
 def _build_messages(
     *,
     template_id: str,
@@ -227,6 +278,14 @@ def _validate_and_build(
             return AIGenerationResult(
                 status="validation_failed",
                 error=f"slot {entry.name!r} evidence not found in original message text",
+                raw_response_json=raw_response_json,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+        if not _value_supported_by_evidence(entry.value, entry.evidence, message_text):
+            return AIGenerationResult(
+                status="validation_failed",
+                error=f"slot {entry.name!r} value {entry.value!r} is not supported by its evidence",
                 raw_response_json=raw_response_json,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,

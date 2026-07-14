@@ -52,6 +52,40 @@ alone, so no separate decision-history table was added (see
 `docs/database_retention.md` for why these tables are also exempt from
 message retention cleanup).
 
+`template_decisions` also carries an immutable **source snapshot**
+(`source_id_snapshot`, `sender_or_region_snapshot`, `sent_at_snapshot`,
+`original_body_snapshot`), written at confirmation time from the `messages`
+row that existed then. This is what makes the message → confirmed-template
+training pair survive `messages` retention cleanup — without it, a decision
+whose source message aged out after `MESSAGE_RETENTION_DAYS` would still
+reference the original text only by an FK that no longer resolves. A
+database created before this column existed migrates automatically (see
+`app/database._migrate_schema`); its older rows simply have `NULL`
+snapshots, and every newly confirmed decision always populates all four.
+
+### Confirming never lies about success
+
+✅ 최종 OK only ever replies `[최종 확정 완료]` after the `template_decisions`
+row is actually written. If that write fails (e.g. a transient SQLite lock),
+the operator gets `[최종 확정 실패]` and the preview is left exactly as it
+was — still `rule_preview`/`ai_preview`, so the same OK button can simply be
+pressed again. (If the decision write itself succeeds but the follow-up
+"mark this preview `confirmed`" bookkeeping update fails, the ground truth
+already exists — the operator still gets a genuine success reply, since a
+retried click just re-upserts the same decision.)
+
+### Latest-preview-only
+
+Selecting a new template for the same message (by the same operator)
+immediately marks any of that operator's other still-active previews for
+that message (`rule_preview`/`ai_preview`) as `superseded`; a successful AI
+generation likewise supersedes the Rule preview it was generated from (a
+*failed* AI attempt does not — the original Rule preview stays confirmable).
+Confirm/cancel/AI on a `superseded`, `cancelled`, or `failed` preview is
+rejected with `[사용할 수 없는 초안]`, pointing the operator at the latest
+Telegram message instead. An already-`confirmed` preview can still be
+re-confirmed (idempotent resend) but never cancelled.
+
 ## Rule extraction vs. on-demand AI
 
 - **Rule** (`app/template_rules.py`, `app/template_extractors.py`,
@@ -79,6 +113,16 @@ message retention cleanup).
   rather than producing a draft.
 - Every attempt — success or failure — is logged in `ai_generations`
   (model, prompt version, token counts, status, error; never the API key).
+- Validation is stricter than "the evidence text exists somewhere in the
+  message": the returned `value` must itself be supported by its `evidence`
+  — a normalized substring for a scalar value, every conservatively-split
+  item present in the evidence or the full message for a list-like value
+  (e.g. "중랑천, 안양천"), or a deterministic time-normalization match
+  (whitespace/leading-zero/`:` vs `시`, no semantic inference) for a
+  pure time value. `value="한강"` next to `evidence="중랑천에 홍수주의보가
+  발령되었습니다"` fails even though that evidence string is real and
+  present in the message — the evidence must actually support *that* value,
+  not just exist. See `app/ai_client.py::_value_supported_by_evidence`.
 - **API-key note**: the real `OPENAI_API_KEY` is provided separately by the
   operator. Until it is supplied, `AI_ENABLED` stays `false` and only
   mocked-client tests exercise this path (see `tests/test_ai_client.py`) —
@@ -87,12 +131,14 @@ message retention cleanup).
 
 ## Known limitations
 
-- Exactly one preview per (message, operator) isn't hard-enforced — the
-  buttons on an older preview for the same message remain technically
-  clickable after a newer one is created. Deliberately not hardened further
-  (see `docs/telegram_template_flow.md`) — "do not overengineer versioning."
 - The rule engine's "실험적 추천" hint uses the same signal-group scoring as
   before; it is cosmetic-only now and never gates or auto-fills anything.
+- The active-preview supersede policy is scoped to `(message_id,
+  selected_by)` — if two different authorized operators both select
+  templates for the same message, each operator's own previews supersede
+  each other independently, not across operators. Not hardened further:
+  that would need per-message locking, which is out of scope for this
+  compact a service.
 
 ## Next phase (not in this session)
 

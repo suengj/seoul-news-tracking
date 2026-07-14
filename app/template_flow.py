@@ -21,12 +21,14 @@ from app.models import DisasterMessageRecord, TelegramStatus
 from app.telegram_sender import (
     TelegramSender,
     build_cancel_message,
+    build_confirm_failed_message,
     build_confirmation_message,
     build_confirmed_preview_keyboard,
     build_preview_complete_message,
     build_preview_incomplete_message,
     build_preview_keyboard,
     build_selection_keyboard,
+    build_stale_preview_message,
     build_template_alert_message,
     parse_callback_data,
     parse_preview_callback_data,
@@ -38,6 +40,12 @@ from app.template_rules import recommend_template
 logger = logging.getLogger(__name__)
 
 AI_PROMPT_VERSION = "v1"
+
+# A preview in one of these statuses is the one confirm/cancel/AI callbacks
+# may act on. rule_preview/ai_preview are "active"; confirmed/cancelled/
+# failed/superseded are all terminal — see docs/service_v1.md "latest
+# preview only" policy.
+_ACTIVE_PREVIEW_STATUSES = ("rule_preview", "ai_preview")
 
 
 def _slots_to_json(slots: dict[str, SlotValue]) -> str:
@@ -180,6 +188,11 @@ def _handle_template_selection(
         logger.exception("failed to record template_action for message_id=%s", message_id)
 
     try:
+        db.supersede_active_previews(message_id=message_id, selected_by=user_id)
+    except Exception:
+        logger.exception("failed to supersede prior active previews for message_id=%s", message_id)
+
+    try:
         preview_id = db.insert_preview(
             message_id=message_id,
             selected_template_id=template_id,
@@ -234,16 +247,21 @@ def _handle_preview_confirm(
         )
         return
 
-    if preview.status not in ("rule_preview", "ai_preview"):
-        logger.warning(
-            "confirm callback for preview_id=%s in non-confirmable status=%s", preview_id, preview.status
+    if preview.status not in _ACTIVE_PREVIEW_STATUSES:
+        # cancelled / superseded / failed: a newer preview exists, or this
+        # one was explicitly cancelled — never resurrect it as a decision.
+        logger.info(
+            "confirm rejected for preview_id=%s in non-active status=%s", preview_id, preview.status
         )
+        sender.send_plain_text(build_stale_preview_message())
         return
 
     missing_slots = json.loads(preview.missing_slots_json or "[]")
     if missing_slots or not preview.rendered_text:
         logger.warning("confirm callback for incomplete preview_id=%s", preview_id)
         return
+
+    record = db.get_by_internal_id(preview.message_id)
 
     try:
         db.upsert_decision(
@@ -254,10 +272,29 @@ def _handle_preview_confirm(
             final_rendered_text=preview.rendered_text,
             generation_method=preview.extraction_method,
             confirmed_by=user_id,
+            source_id_snapshot=record.source_id if record is not None else None,
+            sender_or_region_snapshot=record.sender_or_region if record is not None else None,
+            sent_at_snapshot=record.sent_at.isoformat() if record is not None else None,
+            original_body_snapshot=record.original_body if record is not None else None,
         )
+    except Exception:
+        # The authoritative decision was never written — do not claim
+        # success. The preview is untouched (still rule_preview/ai_preview),
+        # so the same 최종 OK button can be retried.
+        logger.exception("failed to persist decision for preview_id=%s", preview_id)
+        sender.send_plain_text(build_confirm_failed_message())
+        return
+
+    try:
         db.update_preview_status(preview_id, status="confirmed")
     except Exception:
-        logger.exception("failed to persist decision for preview_id=%s", preview_id)
+        # The decision itself is safely written (ground truth exists) — a
+        # failure here is a bookkeeping issue, not a failed confirmation.
+        # Report success; a retried OK click will just re-upsert the same
+        # decision and retry marking the preview confirmed.
+        logger.exception(
+            "decision persisted but preview status update failed for preview_id=%s", preview_id
+        )
 
     sender.send_plain_text(build_confirmation_message(preview.selected_template_id, preview.rendered_text))
 
@@ -268,6 +305,15 @@ def _handle_preview_cancel(
     preview = db.get_preview(preview_id)
     if preview is None:
         logger.warning("cancel callback references unknown preview_id=%s", preview_id)
+        return
+
+    if preview.status not in _ACTIVE_PREVIEW_STATUSES:
+        # Never cancel an already-confirmed preview, and never re-announce a
+        # cancel/supersede/failure that already happened.
+        logger.info(
+            "cancel rejected for preview_id=%s in non-active status=%s", preview_id, preview.status
+        )
+        sender.send_plain_text(build_stale_preview_message())
         return
 
     try:
@@ -288,6 +334,13 @@ def _handle_preview_ai(
     preview = db.get_preview(preview_id)
     if preview is None:
         logger.warning("ai callback references unknown preview_id=%s", preview_id)
+        return
+
+    if preview.status not in _ACTIVE_PREVIEW_STATUSES:
+        logger.info(
+            "ai rejected for preview_id=%s in non-active status=%s", preview_id, preview.status
+        )
+        sender.send_plain_text(build_stale_preview_message())
         return
 
     if not settings.ai_configured:
@@ -375,6 +428,15 @@ def _handle_preview_ai(
     except Exception:
         logger.exception("failed to create ai preview for message_id=%s", preview.message_id)
         return
+
+    # AI generation succeeded (we only reach here past the `!= "succeeded"`
+    # early-return above) — the source Rule preview is now superseded by the
+    # new AI preview. A failed AI call never reaches this line, so the
+    # source Rule preview stays confirmable/cancellable in that case.
+    try:
+        db.update_preview_status(preview_id, status="superseded")
+    except Exception:
+        logger.exception("failed to supersede source preview_id=%s after AI success", preview_id)
 
     if render_result.success:
         text = build_preview_complete_message(

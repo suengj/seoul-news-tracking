@@ -210,6 +210,146 @@ def test_processed_callback_queries_guard(db):
     db.mark_callback_processed("cbq-1")
 
 
+def test_upsert_decision_stores_source_snapshots(db, make_record):
+    record = make_record(source_id="DS-SNAP", body="원문 전체 내용", sender="종로구")
+    db.insert(record)
+    db.upsert_decision(
+        message_id=record.internal_id,
+        preview_id=1,
+        final_template_id="HEAVY_RAIN_CLEARED",
+        final_slots_json="{}",
+        final_rendered_text="문안",
+        generation_method="rule",
+        confirmed_by=111,
+        source_id_snapshot=record.source_id,
+        sender_or_region_snapshot=record.sender_or_region,
+        sent_at_snapshot=record.sent_at.isoformat(),
+        original_body_snapshot=record.original_body,
+    )
+    row = db.get_decision_by_message_id(record.internal_id)
+    assert row["source_id_snapshot"] == "DS-SNAP"
+    assert row["sender_or_region_snapshot"] == "종로구"
+    assert row["original_body_snapshot"] == "원문 전체 내용"
+
+
+def test_reconfirm_updates_snapshots_in_place(db, make_record):
+    record = make_record(source_id="DS-SNAP2", body="첫 원문", sender="종로구")
+    db.insert(record)
+    db.upsert_decision(
+        message_id=record.internal_id,
+        preview_id=1,
+        final_template_id="HEAVY_RAIN_CLEARED",
+        final_slots_json="{}",
+        final_rendered_text="문안1",
+        generation_method="rule",
+        confirmed_by=111,
+        source_id_snapshot=record.source_id,
+        sender_or_region_snapshot=record.sender_or_region,
+        sent_at_snapshot=record.sent_at.isoformat(),
+        original_body_snapshot=record.original_body,
+    )
+    # Reconfirm via a different preview for the same message (e.g. a
+    # different template picked afterward) updates the same row + snapshots.
+    db.upsert_decision(
+        message_id=record.internal_id,
+        preview_id=2,
+        final_template_id="FLOOD_ADVISORY_ISSUED",
+        final_slots_json="{}",
+        final_rendered_text="문안2",
+        generation_method="rule",
+        confirmed_by=111,
+        source_id_snapshot=record.source_id,
+        sender_or_region_snapshot=record.sender_or_region,
+        sent_at_snapshot=record.sent_at.isoformat(),
+        original_body_snapshot="갱신된 원문",
+    )
+    assert db._conn.execute("SELECT COUNT(*) AS c FROM template_decisions").fetchone()["c"] == 1
+    row = db.get_decision_by_message_id(record.internal_id)
+    assert row["final_template_id"] == "FLOOD_ADVISORY_ISSUED"
+    assert row["original_body_snapshot"] == "갱신된 원문"
+
+
+def test_snapshot_columns_migrate_onto_pre_change_schema(tmp_path):
+    """A database created before the snapshot columns existed (Service v1's
+    initial release) must gain them via ALTER TABLE, without losing existing
+    rows or raising."""
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        """
+        CREATE TABLE template_decisions (
+            decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id INTEGER NOT NULL UNIQUE,
+            preview_id INTEGER NOT NULL,
+            final_template_id TEXT NOT NULL,
+            final_slots_json TEXT NOT NULL,
+            final_rendered_text TEXT NOT NULL,
+            generation_method TEXT NOT NULL,
+            confirmed_by INTEGER NOT NULL,
+            confirmed_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO template_decisions (message_id, preview_id, final_template_id, "
+        "final_slots_json, final_rendered_text, generation_method, confirmed_by, confirmed_at) "
+        "VALUES (1, 1, 'HEAVY_RAIN_CLEARED', '{}', '기존 문안', 'rule', 111, '2026-01-01T00:00:00+09:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = Database(path)  # must not raise
+    row = migrated._conn.execute(
+        "SELECT * FROM template_decisions WHERE message_id = 1"
+    ).fetchone()
+    assert row["final_rendered_text"] == "기존 문안"
+    assert row["source_id_snapshot"] is None
+    migrated.close()
+
+
+def test_supersede_active_previews_only_affects_active_statuses_for_that_user(db, make_record):
+    record = make_record(source_id="DS1")
+    db.insert(record)
+    active_id = db.insert_preview(
+        message_id=record.internal_id,
+        selected_template_id="A",
+        selected_by=111,
+        extraction_method="rule",
+        extracted_slots_json="{}",
+        rendered_text="x",
+        missing_slots_json="[]",
+        status="rule_preview",
+    )
+    confirmed_id = db.insert_preview(
+        message_id=record.internal_id,
+        selected_template_id="B",
+        selected_by=111,
+        extraction_method="rule",
+        extracted_slots_json="{}",
+        rendered_text="y",
+        missing_slots_json="[]",
+        status="confirmed",
+    )
+    other_user_active_id = db.insert_preview(
+        message_id=record.internal_id,
+        selected_template_id="C",
+        selected_by=222,
+        extraction_method="rule",
+        extracted_slots_json="{}",
+        rendered_text="z",
+        missing_slots_json="[]",
+        status="rule_preview",
+    )
+
+    db.supersede_active_previews(message_id=record.internal_id, selected_by=111)
+
+    assert db.get_preview(active_id).status == "superseded"
+    assert db.get_preview(confirmed_id).status == "confirmed"
+    assert db.get_preview(other_user_active_id).status == "rule_preview"
+
+
 def test_confirmed_decision_survives_message_retention_cleanup(db, make_record):
     """A confirmed template_decisions row must outlive `messages` retention
     cleanup — message_id columns on template_* tables are deliberately not

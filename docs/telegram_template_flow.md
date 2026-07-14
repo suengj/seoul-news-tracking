@@ -101,22 +101,78 @@ renders cleanly as "incomplete," not a guess.
 
 ## Confirm / cancel / AI
 
+Every one of the three actions below first checks the preview's `status`;
+only `rule_preview`/`ai_preview` ("active") are ever acted on — see "Latest
+preview only" below.
+
 - **✅ 최종 OK** (`_handle_preview_confirm`): validates the preview has no
-  missing slots, `UPSERT`s one row into `template_decisions`
-  (`message_id` is `UNIQUE` — a later confirmation on a different preview
-  for the same message replaces the current decision in place), marks the
-  preview `confirmed`, replies with `[최종 확정 완료]`. Re-clicking OK on an
-  already-`confirmed` preview just resends the same confirmation text —
-  idempotent, no second decision row.
+  missing slots, then writes the decision *before* touching the preview's
+  own status:
+  1. `db.upsert_decision(...)` (includes a source snapshot — see below). If
+     this raises, nothing is marked confirmed and the operator gets
+     `[최종 확정 실패]` — the preview stays `rule_preview`/`ai_preview` so the
+     same button can be retried.
+  2. Only after that succeeds: `db.update_preview_status(..., status=
+     "confirmed")`. If *this* step fails, the decision itself is already
+     safely written — the operator still gets `[최종 확정 완료]` (a retried
+     click just re-upserts the same decision and retries this step).
+  3. Reply with `[최종 확정 완료]`.
+  Re-clicking OK on an already-`confirmed` preview just resends the same
+  confirmation text — idempotent, no second decision row.
 - **↩️ 취소** (`_handle_preview_cancel`): marks the preview `cancelled`,
   resends the original body with the same 8 selection buttons so the
   operator can pick again. Never creates a decision. Previous messages are
-  never deleted.
+  never deleted. Rejected (no state change) if the preview isn't active —
+  see below.
 - **🤖 AI로 작성** (`_handle_preview_ai`): see `docs/service_v1.md`. On
-  success, a *new* `template_previews` row (`extraction_method="ai"`) is
-  created with only `[✅ 최종 OK] [↩️ 취소]`; on failure, the *original*
-  preview is re-shown as incomplete (no new preview row, no AI retry
-  button) so the operator can still cancel and pick again.
+  success, the source Rule preview is marked `superseded` and a *new*
+  `template_previews` row (`extraction_method="ai"`) is created with only
+  `[✅ 최종 OK] [↩️ 취소]`; on failure, the *original* preview is left active
+  (not superseded) and re-shown as incomplete (no new preview row, no AI
+  retry button) so the operator can still confirm-later/cancel/pick again.
+
+## Latest preview only (active-preview supersede policy)
+
+A preview's `status` moves through: `rule_preview`/`ai_preview` (active,
+i.e. confirmable/cancellable) → one of `confirmed` / `cancelled` / `failed`
+/ `superseded` (all terminal). Two things create a new active preview and
+supersede whatever was active before, for that `(message_id, selected_by)`:
+
+- **Selecting a template again** (`db.supersede_active_previews`): any
+  existing `rule_preview`/`ai_preview` row for that message+operator becomes
+  `superseded` before the new one is inserted.
+- **A successful AI generation**: the source Rule preview it was generated
+  from becomes `superseded` (a *failed* AI attempt does not touch it).
+
+`confirmed` rows are never touched by supersede — an already-confirmed
+preview stays `confirmed` forever, and a later re-selection/re-confirmation
+for the same message updates `template_decisions` in place without
+disturbing the earlier confirmed preview's own row (full history stays
+reconstructable from `template_previews`).
+
+Any confirm/cancel/AI callback aimed at a non-active preview (`superseded`,
+`cancelled`, `failed`) gets:
+
+```
+[사용할 수 없는 초안]
+
+더 최신 초안이 있거나 이미 취소된 초안입니다.
+최신 Telegram 메시지의 버튼을 사용해 주세요.
+```
+
+— never silently ignored, and never allowed to resurrect an old preview
+into a decision or a cancellation.
+
+## Decision source snapshots
+
+`template_decisions` carries `source_id_snapshot`/`sender_or_region_
+snapshot`/`sent_at_snapshot`/`original_body_snapshot`, populated from the
+`messages` row at confirmation time. This is what lets a confirmed decision
+outlive the source message's own retention window with the *full* original
+text still attached, not just its `message_id` — see
+`docs/database_retention.md`. A pre-existing database (created before these
+columns existed) migrates them in automatically via `ALTER TABLE` on
+startup; older rows just have `NULL` snapshots.
 
 ## Duplicate-callback guard
 

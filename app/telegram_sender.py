@@ -493,3 +493,23 @@ def build_confirmation_message(template_id: str, final_rendered_text: str) -> st
 def build_cancel_message(original_body: str) -> str:
     lines = ["[선택 취소]", "", "다른 템플릿을 선택해 주세요.", "", "원문:", original_body]
     return "\n".join(lines)
+
+
+def build_confirm_failed_message() -> str:
+    lines = [
+        "[최종 확정 실패]",
+        "",
+        "DB 저장 중 오류가 발생했습니다.",
+        "같은 초안에서 `최종 OK`를 다시 눌러 주세요.",
+    ]
+    return "\n".join(lines)
+
+
+def build_stale_preview_message() -> str:
+    lines = [
+        "[사용할 수 없는 초안]",
+        "",
+        "더 최신 초안이 있거나 이미 취소된 초안입니다.",
+        "최신 Telegram 메시지의 버튼을 사용해 주세요.",
+    ]
+    return "\n".join(lines)

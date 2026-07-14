@@ -326,3 +326,44 @@ All 11 steps passed. Live Telegram button-clicks and live OpenAI calls were
 still not exercised this session (mocks only, per the operator's earlier
 "merge now, mocks-only" decision for the base Service v1 PR) — see the
 final report for current status.
+
+## 0.1.1: multi-user routing / privacy fix
+
+**Root cause**: every interactive send path (`/latest`, ordinary text, and
+every template/preview callback handler) called
+`TelegramSender.send_plain_text(text, reply_markup=...)` with no `chat_id`,
+which silently fell back to the configured broadcast `TELEGRAM_CHAT_ID`.
+`/latest`/text additionally never replied to the requester at all
+(`TelegramBotRunner._handle_authorized` returned `None` for them). One
+shared cause explained both reported symptoms plus a third, previously
+unreported one (callback preview/confirm/cancel/AI responses also
+defaulting to the broadcast chat) — confirmed live in the running
+service's logs (`sendMessage` firing on every inbound `getUpdates` offset
+advance) before any code change was made.
+
+**Fix**: `TelegramSender.send_plain_text` gained explicit `chat_id`,
+`reply_to_message_id`, and `enforce_send_enabled` parameters.
+`app.template_flow.send_initial_alert`/`send_latest_alert` gained
+`target_chat_id`/`persist_suggestion`/`enforce_send_enabled` so the
+automatic poller path (`target_chat_id=TELEGRAM_CHAT_ID`,
+`persist_suggestion=True`, `enforce_send_enabled=True`) and the
+interactive `/latest`/text path (inbound `chat_id`, `persist_suggestion=
+False`, `enforce_send_enabled=False`) share one rendering function with
+different delivery/persistence behavior. Every callback handler in
+`app.template_flow.dispatch_callback` now extracts `interaction_chat_id`
+from `callback_query.message.chat.id` and routes its entire response
+there, failing closed (acknowledge + drop, no default-chat fallback) if
+that field is missing. `template_previews.interaction_chat_id` (new,
+migration-safe column) binds each preview to the chat/user that created
+it; confirm/cancel/AI now reject any callback whose current chat_id/user_id
+doesn't match with `[사용할 수 없는 요청]`, never acting on or revealing the
+mismatched preview. `system_state.telegram_update_offset` (new column)
+persists the `getUpdates` offset so a restart can't replay already-handled
+updates. See `docs/service_v1.md` "Broadcast vs. interactive delivery" and
+`CHANGELOG.md` for the full writeup.
+
+**Tests**: a 15-scenario cross-chat regression suite (broadcast chat vs.
+two authorized operators in separate chats vs. an unauthorized chat) was
+added across `tests/test_telegram_bot.py` and `tests/test_template_flow.py`,
+alongside the existing rendering-parity/duplicate-callback/AI-path
+coverage — see the final report for pass counts.

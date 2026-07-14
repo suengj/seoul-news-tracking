@@ -32,12 +32,28 @@ renderer (MarkdownV2 text only, no buttons) — that renderer no longer
 exists. If the database is empty, `/latest`/plain text instead sends
 "아직 저장된 재난문자가 없습니다." with no keyboard.
 
+Delivery target and persistence differ from a poller-triggered alert even
+though the rendering is identical — see docs/service_v1.md "Broadcast vs.
+interactive delivery": `/latest`/text always reply to the requesting chat
+(`send_latest_alert(..., chat_id=<inbound chat_id>)`), never
+`TELEGRAM_CHAT_ID`, are never gated by `TELEGRAM_SEND_ENABLED`, and never
+add a second `template_suggestions` row for what is just a replay.
+
 There is deliberately no second `getUpdates` consumer — Telegram itself
 would reject a concurrent one for the same bot token with HTTP 409, and a
 local file lock (`app/process_lock.py`) refuses to start a second instance
 of this process regardless. `python -m app.commands.run_local` starts this
 plus the poller as the two child processes that make up the whole local
 runtime.
+
+The offset itself is persisted in `system_state.telegram_update_offset`
+(`Database.get_telegram_update_offset`/`set_telegram_update_offset`):
+`TelegramBotRunner.__init__` loads it at startup (logged as `Telegram bot
+starting: version=<x> persisted_offset=<n>`) and it's written back — a
+short, immediately-committed statement, never held open across a Telegram
+network call — right after each update is handled (or safely rejected). A
+clean or abnormal restart always resumes from the last persisted offset
+instead of replaying already-handled updates.
 
 ## Sending: `poll_once` -> initial alert
 
@@ -101,6 +117,16 @@ inline-button press. For a `tpl:` callback:
 
 Preview callback data: `preview:{preview_id}:confirm|cancel|ai` — never the
 rendered text itself.
+
+Every callback response (selection preview, confirm, cancel, AI) is sent to
+`interaction_chat_id` — `callback_query.message.chat.id`, the chat the
+pressed button's message actually lives in — never `TELEGRAM_CHAT_ID`. A
+callback missing that field is acknowledged (so the spinner stops) and
+dropped, with no default-chat fallback. `template_previews` records this
+chat id (`interaction_chat_id`), and confirm/cancel/AI each require the
+current callback's chat_id *and* user_id to match it/`selected_by` before
+acting — see docs/service_v1.md "Preview ownership" for the exact rejection
+behavior on a mismatch.
 
 ### Incomplete preview format
 

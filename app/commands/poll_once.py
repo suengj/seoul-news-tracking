@@ -146,7 +146,15 @@ def run_poll_cycle(settings: Settings, *, send: bool, notify_existing: bool) -> 
             if send_targets or retry_records:
                 with TelegramSender(settings) as sender:
                     for record in [*send_targets, *retry_records]:
-                        outcome = send_initial_alert(sender, db, settings, record)
+                        outcome = send_initial_alert(
+                            sender,
+                            db,
+                            settings,
+                            record,
+                            target_chat_id=settings.telegram_chat_id,
+                            persist_suggestion=True,
+                            enforce_send_enabled=True,
+                        )
                         db.update_telegram_result(
                             record.internal_id,
                             status=outcome.status,

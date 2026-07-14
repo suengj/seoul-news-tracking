@@ -104,7 +104,8 @@ CREATE TABLE IF NOT EXISTS system_state (
     last_successful_poll_at TEXT,
     last_poll_error TEXT,
     last_new_message_at TEXT,
-    last_cleanup_at TEXT
+    last_cleanup_at TEXT,
+    telegram_update_offset INTEGER NOT NULL DEFAULT 0
 );
 
 INSERT OR IGNORE INTO system_state (id, polling_enabled) VALUES (1, 1);
@@ -157,7 +158,8 @@ CREATE TABLE IF NOT EXISTS template_previews (
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    ai_generation_id INTEGER
+    ai_generation_id INTEGER,
+    interaction_chat_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_template_previews_message_id
@@ -249,6 +251,7 @@ class TemplatePreview:
     created_at: datetime
     updated_at: datetime
     ai_generation_id: int | None
+    interaction_chat_id: str | None
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -282,7 +285,8 @@ class Database:
         them added explicitly. Existing rows get NULL snapshots; every newly
         confirmed decision always populates all four columns."""
         existing_columns = {
-            row["name"] for row in self._conn.execute("PRAGMA table_info(template_decisions)").fetchall()
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(template_decisions)").fetchall()
         }
         snapshot_columns = (
             "source_id_snapshot",
@@ -293,6 +297,22 @@ class Database:
         for column in snapshot_columns:
             if column not in existing_columns:
                 self._conn.execute(f"ALTER TABLE template_decisions ADD COLUMN {column} TEXT")
+
+        preview_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(template_previews)").fetchall()
+        }
+        if "interaction_chat_id" not in preview_columns:
+            self._conn.execute("ALTER TABLE template_previews ADD COLUMN interaction_chat_id TEXT")
+
+        state_columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(system_state)").fetchall()
+        }
+        if "telegram_update_offset" not in state_columns:
+            self._conn.execute(
+                "ALTER TABLE system_state ADD COLUMN telegram_update_offset INTEGER NOT NULL DEFAULT 0"
+            )
+
         self._conn.commit()
 
     def close(self) -> None:
@@ -798,6 +818,7 @@ class Database:
         missing_slots_json: str,
         status: str,
         ai_generation_id: int | None = None,
+        interaction_chat_id: str | int | None = None,
     ) -> int:
         now = datetime.now(tz=SEOUL_TZ).isoformat()
         cur = self._execute_write(
@@ -805,8 +826,8 @@ class Database:
             INSERT INTO template_previews (
                 message_id, selected_template_id, selected_by, extraction_method,
                 extracted_slots_json, rendered_text, missing_slots_json, status,
-                created_at, updated_at, ai_generation_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, updated_at, ai_generation_id, interaction_chat_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message_id,
@@ -820,6 +841,7 @@ class Database:
                 now,
                 now,
                 ai_generation_id,
+                str(interaction_chat_id) if interaction_chat_id is not None else None,
             ),
         )
         return cur.lastrowid
@@ -844,6 +866,7 @@ class Database:
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
             ai_generation_id=row["ai_generation_id"],
+            interaction_chat_id=row["interaction_chat_id"],
         )
 
     def update_preview_status(
@@ -872,7 +895,9 @@ class Database:
                 extracted_slots_json
                 if extracted_slots_json is not None
                 else current.extracted_slots_json,
-                missing_slots_json if missing_slots_json is not None else current.missing_slots_json,
+                missing_slots_json
+                if missing_slots_json is not None
+                else current.missing_slots_json,
                 ai_generation_id if ai_generation_id is not None else current.ai_generation_id,
                 datetime.now(tz=SEOUL_TZ).isoformat(),
                 preview_id,
@@ -1043,6 +1068,18 @@ class Database:
             "INSERT OR IGNORE INTO processed_callback_queries (callback_query_id, processed_at) "
             "VALUES (?, ?)",
             (callback_query_id, datetime.now(tz=SEOUL_TZ).isoformat()),
+        )
+
+    # -- Telegram getUpdates offset (persisted so a restart never replays
+    # already-handled updates) --------------------------------------------
+
+    def get_telegram_update_offset(self) -> int:
+        cur = self._conn.execute("SELECT telegram_update_offset FROM system_state WHERE id = 1")
+        return cur.fetchone()["telegram_update_offset"]
+
+    def set_telegram_update_offset(self, offset: int) -> None:
+        self._execute_write(
+            "UPDATE system_state SET telegram_update_offset = ? WHERE id = 1", (offset,)
         )
 
 

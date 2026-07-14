@@ -27,8 +27,18 @@ class FakeSender:
     def __exit__(self, *exc_info):
         return False
 
-    def send_plain_text(self, text, reply_markup=None):
+    def send_plain_text(
+        self,
+        text,
+        *,
+        chat_id=None,
+        reply_to_message_id=None,
+        reply_markup=None,
+        enforce_send_enabled=True,
+    ):
         self.sent_texts.append(text)
+        self.sent_chat_ids = getattr(self, "sent_chat_ids", [])
+        self.sent_chat_ids.append(chat_id)
         return TelegramSendOutcome(status=TelegramStatus.TELEGRAM_SENT, message_ids=["999"])
 
     @property
@@ -58,9 +68,7 @@ def env_setup(tmp_path, monkeypatch):
 def _records(*ids):
     out = []
     for i, source_id in enumerate(ids):
-        out.append(
-            _make_bare_record(source_id, i)
-        )
+        out.append(_make_bare_record(source_id, i))
     return out
 
 

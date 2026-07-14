@@ -26,6 +26,14 @@ for how to obtain a bot token and chat ID. On-demand AI extraction
 (`AI_ENABLED`/`OPENAI_API_KEY`) is optional and off by default — see
 "On-demand AI" below.
 
+`TELEGRAM_CHAT_ID` is the automatic-broadcast destination only. Every
+interactive request (`/latest`, ordinary text, `/status`, `/pause`,
+`/resume`, `/help`, any template/preview button) always replies to the chat
+it came from instead — see `docs/service_v1.md` "Broadcast vs. interactive
+delivery" for the full distinction, including how to diagnose a reply that
+seems to have gone to the wrong chat. Current version: see
+`docs/versioning.md` (also shown in `/status` and the bot's startup log).
+
 ## Commands
 
 ```bash

@@ -103,9 +103,16 @@ below) — it is not the intended operational control.
 | `/shutdown` | yes, and only if enabled | Dev-only: stop this bot process |
 | *(anything, unauthorized user)* | — | Generic denial; no data revealed |
 
+Every one of these is an **interactive reply**: it always returns to the
+chat the request came from (`message.chat.id`), never to the configured
+broadcast `TELEGRAM_CHAT_ID` — see `docs/service_v1.md` "Broadcast vs.
+interactive delivery" for the full distinction and how to diagnose a
+misrouted reply.
+
 `/status` never includes the bot token, chat ID, `.env` path, absolute
 database path, or exception tracebacks — see `docs/telegram_setup.md` for
-the exact format.
+the exact format. It does include the running service version (see
+`docs/versioning.md`).
 
 ### `/shutdown` (development only)
 
@@ -129,6 +136,11 @@ transient failures. Telegram itself rejects a second concurrent
 `getUpdates` call for the same bot token with HTTP 409; `run_telegram_bot`
 also takes a local file lock (`data/run_telegram_bot.lock`) so a second
 local instance fails fast with a clear error instead of racing.
+
+The offset is persisted in SQLite (`system_state.telegram_update_offset`),
+not just kept in memory — a restart (clean or crashed) resumes from the
+last persisted offset instead of replaying already-handled updates. See
+`docs/telegram_template_flow.md` for the exact read/write points.
 
 **Future migration (not implemented here):** a server deployment would
 likely replace long polling with a Telegram webhook (Telegram pushes

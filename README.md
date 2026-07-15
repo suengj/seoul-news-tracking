@@ -72,6 +72,15 @@ python -m app.commands.sync_templates_from_excel --write
 python -m app.commands.run_poller
 python -m app.commands.run_telegram_bot
 
+# Local-only admin control of the SHARED SafeCity collector (v0.4.1). This is
+# the only explicit shared-poller control; it is NOT a Telegram command and is
+# not exposed via /help. `pause` here stops collection for everyone (not a
+# personal mute). Useful to re-enable a collector left paused by a legacy
+# pre-v0.4.0 Telegram /pause after migrating an older database.
+python -m app.commands.poller_control status
+python -m app.commands.poller_control resume
+python -m app.commands.poller_control pause
+
 # Database size/health, and manual retention cleanup.
 python -m app.commands.database_status
 python -m app.commands.cleanup_database --dry-run
@@ -83,7 +92,12 @@ python -m app.commands.send_telegram_test --confirm
 
 See `docs/local_runtime.md` for the poller/bot process model, personal
 mute/subscribe (`/pause` and `/resume` are personal `/mute`/`/unmute`
-aliases), and SQLite concurrency details.
+aliases), and SQLite concurrency details. The shared SafeCity collector is
+controlled only by the local `poller_control` command above — Telegram
+commands never start/stop collection for other operators, and `/status` never
+exposes who paused the shared collector (v0.4.1). Automatic retry deliveries
+are filtered by the current `TELEGRAM_ALLOWED_USER_IDS`, so a removed user is
+never retried.
 
 ### Service v1: template selection, preview, confirm/cancel/AI
 

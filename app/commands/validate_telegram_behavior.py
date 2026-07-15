@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 from app import template_flow
 from app.ai_client import AIGenerationResult
-from app.commands import poll_once
+from app.commands import poll_once, poller_control
 from app.config import Settings
 from app.database import Database
 from app.models import DisasterMessageRecord, TelegramStatus
@@ -331,7 +331,7 @@ def _check_fan_out_and_retry(db_path: Path, check, monkey_sender) -> None:
 
     # Retry pass targets ONLY B's failed delivery (driven by
     # list_retryable_deliveries, never messages.telegram_status).
-    retryable = db.list_retryable_deliveries()
+    retryable = db.list_retryable_deliveries(settings.telegram_allowed_user_ids)
     monkey_sender["sender"] = RecordingSender(settings)  # now B recovers
     poll_once._fan_out_and_retry(db, settings, [], is_baseline_run=False)
     deliveries2 = {d["user_id_snapshot"]: d["status"] for d in db.get_deliveries_for_message(mid)}
@@ -774,6 +774,94 @@ def _check_seed_and_counts(db_path: Path, check) -> None:
     db.close()
 
 
+def _check_retry_authorization(db_path: Path, check) -> None:
+    """A failed/pending delivery for a user removed from
+    TELEGRAM_ALLOWED_USER_IDS is never retried again (its historical row is
+    kept for audit); a still-allowed operator's failed delivery remains
+    retryable. Mirrors the allowed-user filter used for new deliveries."""
+    db = Database(db_path)
+    db.set_subscription_status(user_id=USER_A, chat_id=CHAT_A, status="active")
+    db.set_subscription_status(user_id=USER_B, chat_id=CHAT_B, status="active")
+    sub_a = db.get_subscription_by_user(USER_A)
+    sub_b = db.get_subscription_by_user(USER_B)
+    mid = db.insert(_record("RA1"))
+    da = db.create_delivery_if_missing(message_id=mid, subscription=sub_a)
+    dbid = db.create_delivery_if_missing(message_id=mid, subscription=sub_b)
+    db.mark_delivery_failed(da, error="net")
+    db.mark_delivery_failed(dbid, error="net")
+
+    both = {r["user_id_snapshot"] for r in db.list_retryable_deliveries((USER_A, USER_B))}
+    # Operator B removed from the allowed configuration.
+    only_a = [r["user_id_snapshot"] for r in db.list_retryable_deliveries((USER_A,))]
+    audit_users = {d["user_id_snapshot"] for d in db.get_deliveries_for_message(mid)}
+    check(
+        "Retry authorization filtering",
+        both == {USER_A, USER_B}
+        and only_a == [USER_A]
+        and audit_users == {USER_A, USER_B}  # B's row retained for audit
+        and db.list_retryable_deliveries(()) == [],  # empty allowed => no rows, no invalid SQL
+    )
+    db.close()
+
+
+def _check_status_privacy(db_path: Path, check) -> None:
+    """A /status reply never exposes who paused the shared collector
+    (paused_by/resumed_by), while still showing personal + shared sections;
+    the DB retains the attribution for audit."""
+    db = Database(db_path)
+    settings = _settings(database_path=db_path)
+    pauser_id = 876543210  # a real-looking operator id that must never leak
+    db.pause_polling(actor_user_id=pauser_id)
+    db.set_subscription_status(user_id=USER_A, chat_id=CHAT_A, status="active")
+    text = build_status_reply(db, settings, user_id=USER_A, chat_id=CHAT_A)
+    check(
+        "Status privacy",
+        str(pauser_id) not in text
+        and "요청자" not in text
+        and "paused_by" not in text
+        and "내 알림 상태" in text
+        and "공통 수집 상태" in text
+        and db.get_system_state().paused_by == pauser_id,  # retained for audit
+    )
+    db.close()
+
+
+def _check_pause_separation_and_poller_control(db_path: Path, check) -> None:
+    """Personal /resume (Telegram) never changes shared polling_enabled, while
+    the local poller_control command does."""
+    db = Database(db_path)
+    settings = _settings(database_path=db_path)
+
+    # Shared collector paused via the local admin command (the only shared
+    # control since v0.4.0).
+    poller_control.cmd_pause(db)
+    shared_paused = db.is_polling_enabled() is False
+
+    # A personal Telegram /resume (unmute alias) must NOT re-enable the shared
+    # collector — it only restores the operator's own subscription.
+    bot = TelegramBotRunner(settings, db, sender=RecordingSender(settings))
+    try:
+        db.set_subscription_status(user_id=USER_A, chat_id=CHAT_A, status="muted")
+        bot.dispatch(_message(1, USER_A, "/resume", chat_id=CHAT_A))
+    finally:
+        bot.close()
+    personal_resume_isolated = (
+        db.subscription_status_for(USER_A) == "active" and db.is_polling_enabled() is False
+    )
+    check(
+        "Personal/global pause separation",
+        shared_paused and personal_resume_isolated,
+    )
+
+    # The local poller_control resume DOES change the shared state.
+    poller_control.cmd_resume(db)
+    check(
+        "Local poller control",
+        db.is_polling_enabled() is True,
+    )
+    db.close()
+
+
 def main() -> int:
     results: list[tuple[str, bool]] = []
 
@@ -798,6 +886,9 @@ def main() -> int:
         _check_no_fallback_and_ack(Path(tmp) / "nofb.db", check)
         _check_legacy_decision_migration(Path(tmp) / "legacy.db", check)
         _check_seed_and_counts(Path(tmp) / "seed.db", check)
+        _check_retry_authorization(Path(tmp) / "retryauth.db", check)
+        _check_status_privacy(Path(tmp) / "statuspriv.db", check)
+        _check_pause_separation_and_poller_control(Path(tmp) / "pausesep.db", check)
 
     print("Independent operator validation")
     failed = 0

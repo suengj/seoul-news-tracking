@@ -125,12 +125,12 @@ def test_list_retryable_excludes_baseline_and_inactive(db, make_record):
     normal_did = db.create_delivery_if_missing(message_id=normal_mid, subscription=sub)
     db.mark_delivery_failed(normal_did, error="x")
 
-    retryable = db.list_retryable_deliveries()
+    retryable = db.list_retryable_deliveries((USER_A, USER_B))
     assert [r["message_id"] for r in retryable] == [normal_mid]
 
     # Muting the subscription removes it from the retry set.
     db.set_subscription_status(user_id=USER_A, chat_id=CHAT_A, status="muted")
-    assert db.list_retryable_deliveries() == []
+    assert db.list_retryable_deliveries((USER_A, USER_B)) == []
 
 
 def test_update_message_aggregate_status_derivation(db, make_record):
@@ -201,7 +201,7 @@ def test_retry_targets_only_failed_recipient(db, settings, patch_sender, make_re
     poll_once._fan_out_and_retry(db, settings, [db.get_by_internal_id(mid)], is_baseline_run=False)
 
     # Retry pass with a healthy sender: only B's failed delivery is retried.
-    retryable = db.list_retryable_deliveries()
+    retryable = db.list_retryable_deliveries((USER_A, USER_B))
     assert [r["user_id_snapshot"] for r in retryable] == [USER_B]
 
     patch_sender["sender"] = FakeSender(settings)
@@ -243,3 +243,136 @@ def test_global_send_switch_off_leaves_deliveries_pending(db, settings, patch_se
     poll_once._fan_out_and_retry(db, off, [db.get_by_internal_id(mid)], is_baseline_run=False)
     statuses = {d["status"] for d in db.get_deliveries_for_message(mid)}
     assert statuses == {"pending"}  # master switch off: retry later, not failed
+
+
+# --- retry authorization filtering (v0.4.1) ----------------------------------
+
+
+def _failed_delivery(db, make_record, *, user_id, chat_id, source_id):
+    """Set up one active subscription with a single failed delivery; return message_id."""
+    db.set_subscription_status(user_id=user_id, chat_id=chat_id, status="active")
+    sub = db.get_subscription_by_user(user_id)
+    mid = db.insert(make_record(source_id=source_id))
+    did = db.create_delivery_if_missing(message_id=mid, subscription=sub)
+    db.mark_delivery_failed(did, error="net")
+    return mid
+
+
+def test_retry_returned_for_active_allowed_user(db, make_record):
+    mid = _failed_delivery(db, make_record, user_id=USER_A, chat_id=CHAT_A, source_id="R1")
+    rows = db.list_retryable_deliveries((USER_A, USER_B))
+    assert [r["message_id"] for r in rows] == [mid]
+
+
+def test_retry_excluded_for_removed_user(db, make_record):
+    mid = _failed_delivery(db, make_record, user_id=USER_A, chat_id=CHAT_A, source_id="R2")
+    # User A is no longer in the allowed configuration.
+    assert db.list_retryable_deliveries((USER_B,)) == []
+    # But the historical delivery row is retained for audit — not deleted.
+    assert len(db.get_deliveries_for_message(mid)) == 1
+
+
+def test_retry_excluded_for_muted_user(db, make_record):
+    _failed_delivery(db, make_record, user_id=USER_A, chat_id=CHAT_A, source_id="R3")
+    db.set_subscription_status(user_id=USER_A, chat_id=CHAT_A, status="muted")
+    assert db.list_retryable_deliveries((USER_A, USER_B)) == []
+
+
+def test_retry_excluded_for_unsubscribed_user(db, make_record):
+    _failed_delivery(db, make_record, user_id=USER_A, chat_id=CHAT_A, source_id="R4")
+    db.set_subscription_status(user_id=USER_A, chat_id=CHAT_A, status="unsubscribed")
+    assert db.list_retryable_deliveries((USER_A, USER_B)) == []
+
+
+def test_retry_excluded_for_group_subscription(db, make_record):
+    # A non-private (group) subscription is never retried, even if allowed+active.
+    db.register_or_touch_subscription(
+        user_id=USER_A, chat_id=-400, chat_type="group", activate_if_new=True
+    )
+    # Force it active to prove chat_type (not status) is what excludes it.
+    db._execute_write(
+        "UPDATE telegram_subscriptions SET status='active' WHERE user_id=?", (USER_A,)
+    )
+    sub = db.get_subscription_by_user(USER_A)
+    mid = db.insert(make_record(source_id="R5"))
+    did = db.create_delivery_if_missing(message_id=mid, subscription=sub)
+    db.mark_delivery_failed(did, error="net")
+    assert db.list_retryable_deliveries((USER_A, USER_B)) == []
+
+
+def test_retry_excluded_for_baseline_message(db, make_record):
+    db.set_subscription_status(user_id=USER_A, chat_id=CHAT_A, status="active")
+    sub = db.get_subscription_by_user(USER_A)
+    mid = db.insert(make_record(source_id="R6"), is_baseline=True)
+    did = db.create_delivery_if_missing(message_id=mid, subscription=sub)
+    db.mark_delivery_failed(did, error="net")
+    assert db.list_retryable_deliveries((USER_A, USER_B)) == []
+
+
+def test_retry_excluded_when_source_message_missing(db, make_record):
+    db.set_subscription_status(user_id=USER_A, chat_id=CHAT_A, status="active")
+    sub = db.get_subscription_by_user(USER_A)
+    mid = db.insert(make_record(source_id="R7"))
+    did = db.create_delivery_if_missing(message_id=mid, subscription=sub)
+    db.mark_delivery_failed(did, error="net")
+    # Delete the source message; the JOIN drops the orphaned delivery from retry.
+    db._execute_write("DELETE FROM messages WHERE internal_id=?", (mid,))
+    assert db.list_retryable_deliveries((USER_A, USER_B)) == []
+
+
+def test_retry_empty_allowed_list_returns_no_rows(db, make_record):
+    _failed_delivery(db, make_record, user_id=USER_A, chat_id=CHAT_A, source_id="R8")
+    # Empty allowed list must be safe (no invalid IN () SQL) and yield nothing.
+    assert db.list_retryable_deliveries(()) == []
+    assert db.list_retryable_deliveries([]) == []
+
+
+def test_retry_one_removed_does_not_affect_another_allowed(db, make_record):
+    db.set_subscription_status(user_id=USER_A, chat_id=CHAT_A, status="active")
+    db.set_subscription_status(user_id=USER_B, chat_id=CHAT_B, status="active")
+    sub_a = db.get_subscription_by_user(USER_A)
+    sub_b = db.get_subscription_by_user(USER_B)
+    mid = db.insert(make_record(source_id="R9"))
+    da = db.create_delivery_if_missing(message_id=mid, subscription=sub_a)
+    dbid = db.create_delivery_if_missing(message_id=mid, subscription=sub_b)
+    db.mark_delivery_failed(da, error="net")
+    db.mark_delivery_failed(dbid, error="net")
+    # A removed from config; only B (still allowed) is retryable.
+    rows = db.list_retryable_deliveries((USER_B,))
+    assert [r["user_id_snapshot"] for r in rows] == [USER_B]
+    # A's failed row still exists for audit.
+    users = {d["user_id_snapshot"] for d in db.get_deliveries_for_message(mid)}
+    assert users == {USER_A, USER_B}
+
+
+def test_fan_out_skips_retry_for_removed_user(
+    db, patch_sender, make_settings, make_record, tmp_path
+):
+    # End-to-end through poll_once: B has a failed delivery, then B is removed
+    # from TELEGRAM_ALLOWED_USER_IDS — the next poll must not retry B.
+    _activate_both(db)
+    both = make_settings(
+        telegram_allowed_user_ids=(USER_A, USER_B),
+        telegram_send_enabled=True,
+        database_path=tmp_path / "delivery.db",
+    )
+    patch_sender["sender"] = FakeSender(both, fail_chat_ids=[CHAT_B])
+    mid = db.insert(make_record(source_id="R10"))
+    poll_once._fan_out_and_retry(db, both, [db.get_by_internal_id(mid)], is_baseline_run=False)
+    assert {d["user_id_snapshot"]: d["status"] for d in db.get_deliveries_for_message(mid)} == {
+        USER_A: "sent",
+        USER_B: "failed",
+    }
+
+    # Remove B from the allowed configuration; retry pass with a healthy sender.
+    only_a = make_settings(
+        telegram_allowed_user_ids=(USER_A,),
+        telegram_send_enabled=True,
+        database_path=tmp_path / "delivery.db",
+    )
+    patch_sender["sender"] = FakeSender(only_a)
+    poll_once._fan_out_and_retry(db, only_a, [], is_baseline_run=False)
+    # B's delivery is still failed (never retried); A untouched-and-sent.
+    statuses = {d["user_id_snapshot"]: d["status"] for d in db.get_deliveries_for_message(mid)}
+    assert statuses == {USER_A: "sent", USER_B: "failed"}
+    assert patch_sender["sender"].sent_chat_ids == []  # nothing (B) retried

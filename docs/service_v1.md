@@ -2,7 +2,7 @@
 
 Current version: see `pyproject.toml` / `app/version.py` (also shown in the
 Telegram bot's startup log and `/status` reply) — see `docs/versioning.md`
-for the release process. As of this writing: **0.4.0**.
+for the release process. As of this writing: **0.4.1**.
 
 Service v1 integrates the recurring local poller and Telegram command bot
 (previously a separate branch) with the deterministic template engine
@@ -19,6 +19,16 @@ never auto-selects, auto-renders-and-sends, or auto-confirms anything.
 > Operational actions are private-chat only (group actions are rejected in
 > place). See `docs/independent_operator_model.md` for the full model — the
 > sections below describe the underlying flow, which is unchanged per operator.
+>
+> **v0.4.1 hotfix.** Two narrow fixes on top of v0.4.0 (architecture
+> unchanged): automatic **retry** deliveries are filtered by the current
+> `TELEGRAM_ALLOWED_USER_IDS` (a user removed from the allow-list is never
+> retried; their historical row is kept for audit), and `/status` no longer
+> exposes the identity that paused the shared collector. The shared SafeCity
+> collector is now controlled only by the local `python -m
+> app.commands.poller_control` command (`status` / `resume` / `pause`) — not a
+> Telegram command and not in `/help`. Telegram `/pause` and `/resume` remain
+> personal mute/unmute.
 
 ## The flow
 

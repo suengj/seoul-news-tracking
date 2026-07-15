@@ -2,6 +2,65 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-15
+
+Independent Telegram operators: every authorized operator is now an equal,
+independent entity. The SafeCity collector and `messages` DB stay shared;
+automatic delivery, commands, previews, decisions, AI, and mute/subscribe
+state are fully personal. There is no primary/default chat — `TELEGRAM_CHAT_ID`
+degrades to a legacy migration/bootstrap value only. See
+[docs/independent_operator_model.md](docs/independent_operator_model.md).
+
+### Added
+- Personal subscriptions (`telegram_subscriptions`): one equal, independent
+  subscription per authorized operator (`active` / `muted` / `unsubscribed`),
+  auto-registered on first authorized private interaction.
+- Per-recipient automatic delivery (`telegram_deliveries`): each new SafeCity
+  record fans out independently to every active private subscription, one
+  delivery row per recipient, so one recipient's failure never blocks another
+  and retries target only the failed recipient.
+- Personal notification commands `/subscribe`, `/unsubscribe`, `/mute`,
+  `/unmute`; `/pause` and `/resume` are now personal aliases of `/mute` and
+  `/unmute` (they no longer touch shared polling).
+- Non-blocking on-demand AI: a bounded `ThreadPoolExecutor`
+  (`TELEGRAM_AI_WORKERS`, 1–4, default 2) runs AI generation so one operator's
+  AI request never blocks another operator's non-AI commands.
+- `TELEGRAM_AI_WORKERS` setting (validated 1–4).
+- Extended offline validator (`validate_telegram_behavior`) covering the full
+  independent-operator model (dual auto-register, fan-out, independent retry,
+  personal mute/subscribe, group rejection, preview/decision isolation, AI
+  independence, no legacy fallback, no backfill, legacy decision migration).
+
+### Changed
+- Automatic delivery no longer targets a single `TELEGRAM_CHAT_ID`; it uses
+  active personal subscriptions loaded from SQLite. `TELEGRAM_ALLOWED_USER_IDS`
+  are the operators; `TELEGRAM_SEND_ENABLED` remains the global master switch.
+- Operational commands and inline buttons are strictly private-chat only; a
+  group/supergroup/channel action is acknowledged and rejected in place, never
+  processed and never rerouted to a private chat.
+- `/status` shows two independent sections: the caller's own personal alert
+  status and the shared common-collection status (no other operator's ids).
+- Previews and Final-OK decisions are scoped per operator+chat:
+  `template_decisions` is rebuilt to `UNIQUE(message_id, confirmed_by,
+  interaction_chat_id)`; `template_actions` and `ai_generations` gain
+  `interaction_chat_id`. `messages.telegram_status` / `telegram_message_id`
+  are retained as backward-compatible aggregates derived from
+  `telegram_deliveries`.
+
+### Fixed
+- `create_delivery_if_missing` now uses the cursor `rowcount` (not the stale
+  `lastrowid`) to detect an ignored duplicate insert, so fan-out never
+  re-sends an already-recorded per-recipient delivery.
+
+### Migration
+- Idempotent, atomic rebuild of `template_decisions` preserving every existing
+  decision and its immutable source snapshots; `interaction_chat_id` is
+  recovered from the confirming preview or defaults to the literal `'legacy'`.
+- One-time subscription bootstrap seeds active peers from historical private
+  Preview owners for authorized users, then the legacy `TELEGRAM_CHAT_ID` only
+  when it maps unambiguously to exactly one allowed user (never a negative
+  group id, never a guessed owner).
+
 ## [0.3.0] - 2026-07-14
 
 ### Added

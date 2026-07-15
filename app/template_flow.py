@@ -8,21 +8,25 @@ Nothing here auto-picks or auto-confirms a template. A row in
 `template_decisions` — the future automation ground truth — is written only
 from `_handle_preview_confirm`, i.e. only from an explicit operator "최종 OK".
 
-Two distinct Telegram delivery concepts (see docs/service_v1.md):
+Two distinct Telegram delivery concepts (see docs/independent_operator_model.md):
 
-- **automatic broadcast**: only `app.commands.poll_once` uses this, for a
-  genuinely new SafeCity message. Always targets the configured
-  `TELEGRAM_CHAT_ID`, honors `TELEGRAM_SEND_ENABLED`, and persists a
-  `template_suggestions` row once.
-- **interactive reply**: `/latest`, ordinary text, and every callback
+- **personal automatic delivery**: only `app.commands.poll_once` uses this,
+  fanning a genuinely new SafeCity message out independently to every active
+  personal subscription. Honors the global `TELEGRAM_SEND_ENABLED` master
+  switch and persists a `template_suggestions` row once per message.
+- **personal interactive reply**: `/latest`, ordinary text, and every callback
   (template selection, preview confirm/cancel/AI). Always targets the chat_id
   the inbound message/callback actually came from — never a silent fallback
-  to `TELEGRAM_CHAT_ID` — never gated by `TELEGRAM_SEND_ENABLED`, and never
-  persists a duplicate `template_suggestions` row.
+  to the legacy `TELEGRAM_CHAT_ID` — never gated by `TELEGRAM_SEND_ENABLED`,
+  and never persists a duplicate `template_suggestions` row.
 
-Every callback handler below additionally requires the callback's chat_id and
-user_id to match the preview's `interaction_chat_id`/`selected_by` before
-acting on it — see `_preview_matches_caller`.
+Every authorized operator is an equal, independent entity: each callback
+handler requires the callback's chat_id and user_id to match the preview's
+`interaction_chat_id`/`selected_by` before acting on it (see
+`_preview_matches_caller`), so one operator can never act on, supersede, or
+overwrite another operator's preview or decision. On-demand AI generation is
+dispatched to a bounded worker pool so one operator's AI request never blocks
+another operator's non-AI commands.
 """
 
 from __future__ import annotations
@@ -30,15 +34,17 @@ from __future__ import annotations
 import json
 import logging
 import time
+from concurrent.futures import Executor
 
 from app.ai_client import generate_slots
 from app.config import Settings
-from app.database import Database, TemplatePreview
+from app.database import Database, TemplatePreview, open_database
 from app.models import DisasterMessageRecord, TelegramStatus
 from app.telegram_routing import chat_type_of, elapsed_ms_since, log_telegram_route
 from app.telegram_sender import (
     TelegramSender,
     TelegramSendOutcome,
+    build_ai_unavailable_message,
     build_cancel_message,
     build_category_keyboard,
     build_category_select_message,
@@ -51,6 +57,7 @@ from app.telegram_sender import (
     build_preview_complete_message,
     build_preview_incomplete_message,
     build_preview_keyboard,
+    build_private_chat_only_message,
     build_selection_keyboard,
     build_stale_preview_message,
     build_template_alert_message,
@@ -265,16 +272,29 @@ def _authorized(settings: Settings, user_id: int | None) -> bool:
 
 
 def dispatch_callback(
-    db: Database, settings: Settings, sender: TelegramSender, callback_query: dict
+    db: Database,
+    settings: Settings,
+    sender: TelegramSender,
+    callback_query: dict,
+    *,
+    ai_executor: Executor | None = None,
 ) -> None:
     """Single entry point for every inline-button press: history, category,
     template selection, preview confirm/cancel/AI.
 
     Every response is routed to `interaction_chat_id` — the chat the
     callback's own message lives in (`callback_query.message.chat.id`) —
-    never to the configured broadcast `TELEGRAM_CHAT_ID`. If that chat id is
-    missing (malformed update), the callback is acknowledged (stops the
-    Telegram spinner) but nothing further happens: no default-chat fallback.
+    never to the legacy `TELEGRAM_CHAT_ID`. If that chat id is missing
+    (malformed update), the callback is acknowledged (stops the Telegram
+    spinner) but nothing further happens: no default-chat fallback.
+
+    Operational callbacks are private-chat only: a callback from a group/
+    supergroup/channel is acknowledged and politely rejected in that chat,
+    never processed and never silently rerouted to a private chat.
+
+    `ai_executor` is a bounded thread pool used only for the slow AI
+    generation branch so one operator's AI request never blocks another
+    operator's non-AI callbacks. When None (poll_once/tests) AI runs inline.
     """
     started = time.monotonic()
     callback_query_id = callback_query.get("id", "")
@@ -323,6 +343,38 @@ def dispatch_callback(
         )
         _route("callback", "unauthorized")
         return
+
+    # Operational actions are private-chat only. A group/supergroup/channel
+    # callback is acked (spinner stops) and rejected in-place — never
+    # processed, never rerouted to a private chat.
+    if chat_type != "private":
+        if callback_query_id:
+            db.mark_callback_processed(callback_query_id)
+        try:
+            sender.send_plain_text(
+                build_private_chat_only_message(),
+                chat_id=interaction_chat_id,
+                enforce_send_enabled=False,
+            )
+        except Exception:
+            logger.exception(
+                "failed to send private-chat-only rejection to chat_id=%s", interaction_chat_id
+            )
+        _route("callback", "group_rejected")
+        return
+
+    # Every authorized private interaction touches the operator's own
+    # subscription (creating it active on first contact). Never reactivates a
+    # muted/unsubscribed operator; status changes only via explicit commands.
+    try:
+        db.register_or_touch_subscription(
+            user_id=user_id,
+            chat_id=interaction_chat_id,
+            chat_type="private",
+            registration_source="callback",
+        )
+    except Exception:
+        logger.exception("failed to touch subscription for user_id=%s", user_id)
 
     if callback_query_id and db.has_processed_callback(callback_query_id):
         _route("callback", "duplicate_ignored")
@@ -426,9 +478,12 @@ def dispatch_callback(
     preview_parsed = parse_preview_callback_data(data)
     if preview_parsed is not None:
         preview_id, action = preview_parsed
-        if callback_query_id:
-            db.mark_callback_processed(callback_query_id)
         is_ai = action == "ai"
+        # Non-AI callbacks are marked processed up-front (synchronous). The AI
+        # branch defers marking until the task is successfully submitted, so a
+        # submit failure stays retryable — see _submit_ai_preview.
+        if callback_query_id and not is_ai:
+            db.mark_callback_processed(callback_query_id)
         try:
             if action == "confirm":
                 _handle_preview_confirm(
@@ -449,13 +504,15 @@ def dispatch_callback(
                     interaction_chat_id=interaction_chat_id,
                 )
             else:
-                _handle_preview_ai(
+                _submit_ai_preview(
                     db,
                     settings,
                     sender,
                     preview_id=preview_id,
                     user_id=user_id,
                     interaction_chat_id=interaction_chat_id,
+                    callback_query_id=callback_query_id,
+                    ai_executor=ai_executor,
                 )
             log_telegram_route(
                 action=f"preview_{action}",
@@ -522,12 +579,17 @@ def _handle_template_selection(
             extraction_json=extraction_json,
             rendered_text=render_result.rendered_text,
             status="preview_created" if render_result.success else "preview_incomplete",
+            interaction_chat_id=interaction_chat_id,
         )
     except Exception:
         logger.exception("failed to record template_action for message_id=%s", message_id)
 
     try:
-        db.supersede_active_previews(message_id=message_id, selected_by=user_id)
+        db.supersede_active_previews(
+            message_id=message_id,
+            selected_by=user_id,
+            interaction_chat_id=interaction_chat_id,
+        )
     except Exception:
         logger.exception("failed to supersede prior active previews for message_id=%s", message_id)
 
@@ -644,6 +706,7 @@ def _handle_preview_confirm(
             final_rendered_text=preview.rendered_text,
             generation_method=preview.extraction_method,
             confirmed_by=user_id,
+            interaction_chat_id=interaction_chat_id,
             source_id_snapshot=record.source_id if record is not None else None,
             sender_or_region_snapshot=record.sender_or_region if record is not None else None,
             sent_at_snapshot=record.sent_at.isoformat() if record is not None else None,
@@ -720,7 +783,7 @@ def _handle_preview_cancel(
     )
 
 
-def _handle_preview_ai(
+def _submit_ai_preview(
     db: Database,
     settings: Settings,
     sender: TelegramSender,
@@ -728,14 +791,26 @@ def _handle_preview_ai(
     preview_id: int,
     user_id: int,
     interaction_chat_id: str | int,
+    callback_query_id: str,
+    ai_executor: Executor | None,
 ) -> None:
+    """Fast synchronous validation of an AI request (no network), then dispatch
+    the slow generation to the bounded worker pool so it never blocks another
+    operator's non-AI callbacks. The duplicate-callback guard is marked
+    processed only after the task is accepted — a submit failure stays
+    retryable and replies `[AI 요청 처리 불가]`. When `ai_executor` is None
+    (poll_once/tests) the task runs inline using the caller's db+sender."""
     preview = db.get_preview(preview_id)
     if preview is None:
         logger.warning("ai callback references unknown preview_id=%s", preview_id)
+        if callback_query_id:
+            db.mark_callback_processed(callback_query_id)
         return
 
     if not _preview_matches_caller(preview, chat_id=interaction_chat_id, user_id=user_id):
         _reject_cross_chat(sender, interaction_chat_id=interaction_chat_id, preview_id=preview_id)
+        if callback_query_id:
+            db.mark_callback_processed(callback_query_id)
         return
 
     if preview.status not in _ACTIVE_PREVIEW_STATUSES:
@@ -745,6 +820,8 @@ def _handle_preview_ai(
         sender.send_plain_text(
             build_stale_preview_message(), chat_id=interaction_chat_id, enforce_send_enabled=False
         )
+        if callback_query_id:
+            db.mark_callback_processed(callback_query_id)
         return
 
     if not settings.ai_configured:
@@ -754,6 +831,102 @@ def _handle_preview_ai(
             "AI 기능이 비활성화되어 있습니다. (AI_ENABLED=false)",
             chat_id=interaction_chat_id,
             enforce_send_enabled=False,
+        )
+        if callback_query_id:
+            db.mark_callback_processed(callback_query_id)
+        return
+
+    if ai_executor is None:
+        # Inline path (poll_once/tests): reuse the caller's db + sender.
+        if callback_query_id:
+            db.mark_callback_processed(callback_query_id)
+        _run_ai_preview(
+            db,
+            settings,
+            sender,
+            preview_id=preview_id,
+            user_id=user_id,
+            interaction_chat_id=interaction_chat_id,
+        )
+        return
+
+    try:
+        ai_executor.submit(
+            run_ai_preview_task,
+            settings,
+            preview_id=preview_id,
+            user_id=user_id,
+            interaction_chat_id=interaction_chat_id,
+        )
+    except Exception:
+        logger.exception("failed to submit AI task for preview_id=%s", preview_id)
+        try:
+            sender.send_plain_text(
+                build_ai_unavailable_message(),
+                chat_id=interaction_chat_id,
+                enforce_send_enabled=False,
+            )
+        except Exception:
+            logger.exception("failed to notify AI submit failure for preview_id=%s", preview_id)
+        # Do NOT mark processed — the operator may retry the AI button.
+        return
+
+    if callback_query_id:
+        db.mark_callback_processed(callback_query_id)
+
+
+def run_ai_preview_task(
+    settings: Settings,
+    *,
+    preview_id: int,
+    user_id: int,
+    interaction_chat_id: str | int,
+) -> None:
+    """Worker-thread entry point for on-demand AI generation. Opens its own
+    Database + TelegramSender (no sqlite connection shared across threads),
+    runs generation to completion, and delivers the result only to the
+    originating operator's chat. Never raises out of the worker thread."""
+    try:
+        with (
+            open_database(settings.database_path) as db,
+            TelegramSender(settings) as sender,
+        ):
+            _run_ai_preview(
+                db,
+                settings,
+                sender,
+                preview_id=preview_id,
+                user_id=user_id,
+                interaction_chat_id=interaction_chat_id,
+            )
+    except Exception:
+        logger.exception("AI preview task crashed for preview_id=%s", preview_id)
+
+
+def _run_ai_preview(
+    db: Database,
+    settings: Settings,
+    sender: TelegramSender,
+    *,
+    preview_id: int,
+    user_id: int,
+    interaction_chat_id: str | int,
+) -> None:
+    # Reload and revalidate: the preview's state may have changed between
+    # submission and execution (operator cancelled, a newer preview
+    # superseded it, ownership no longer matches). Never act on a stale one.
+    preview = db.get_preview(preview_id)
+    if preview is None:
+        logger.warning("ai task: preview_id=%s no longer exists", preview_id)
+        return
+    if not _preview_matches_caller(preview, chat_id=interaction_chat_id, user_id=user_id):
+        logger.warning("ai task: ownership changed for preview_id=%s — skipping", preview_id)
+        return
+    if preview.status not in _ACTIVE_PREVIEW_STATUSES:
+        logger.info(
+            "ai task: preview_id=%s no longer active (status=%s) — skipping",
+            preview_id,
+            preview.status,
         )
         return
 
@@ -778,6 +951,7 @@ def _handle_preview_ai(
             model=settings.openai_model,
             prompt_version=AI_PROMPT_VERSION,
             request_slots_json=preview.extracted_slots_json,
+            interaction_chat_id=interaction_chat_id,
         )
     except Exception:
         logger.exception("failed to log ai_generation for preview_id=%s", preview_id)

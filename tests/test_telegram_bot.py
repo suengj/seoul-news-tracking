@@ -34,12 +34,12 @@ def _record_handler(sent: list[dict]):
     return handler
 
 
-def _message_update(update_id, user_id, text, *, chat_id=555, message_id=None):
+def _message_update(update_id, user_id, text, *, chat_id=555, message_id=None, chat_type="private"):
     return {
         "update_id": update_id,
         "message": {
             "message_id": message_id or update_id * 10,
-            "chat": {"id": chat_id},
+            "chat": {"id": chat_id, "type": chat_type},
             "from": {"id": user_id, "first_name": "Test"},
             "text": text,
         },
@@ -223,12 +223,15 @@ def test_status_does_not_leak_secrets_or_paths(make_settings, db, tmp_path):
 
 
 def test_pause_command(make_settings, db):
+    # v0.4.0: /pause is a personal mute alias — it silences THIS operator's
+    # own automatic delivery and must NOT touch the shared polling state.
     settings = make_settings(telegram_allowed_user_ids=(111,))
     sent = []
     bot = make_bot(settings, db, _record_handler(sent))
     bot.dispatch(_message_update(1, user_id=111, text="/pause"))
-    assert db.is_polling_enabled() is False
-    assert "일시정지" in sent[0]["text"]
+    assert db.is_polling_enabled() is True
+    assert db.subscription_status_for(111) == "muted"
+    assert "음소거" in sent[0]["text"]
 
 
 def test_repeated_pause_is_idempotent_and_replies_accordingly(make_settings, db):
@@ -237,7 +240,7 @@ def test_repeated_pause_is_idempotent_and_replies_accordingly(make_settings, db)
     bot = make_bot(settings, db, _record_handler(sent))
     bot.dispatch(_message_update(1, user_id=111, text="/pause"))
     bot.dispatch(_message_update(2, user_id=111, text="/pause"))
-    assert db.is_polling_enabled() is False
+    assert db.subscription_status_for(111) == "muted"
     assert "이미" in sent[1]["text"]
 
 
@@ -247,8 +250,9 @@ def test_resume_command(make_settings, db):
     bot = make_bot(settings, db, _record_handler(sent))
     bot.dispatch(_message_update(1, user_id=111, text="/pause"))
     bot.dispatch(_message_update(2, user_id=111, text="/resume"))
+    assert db.subscription_status_for(111) == "active"
     assert db.is_polling_enabled() is True
-    assert "재개" in sent[1]["text"]
+    assert "해제" in sent[1]["text"]
 
 
 def test_repeated_resume_is_idempotent(make_settings, db):
@@ -256,18 +260,21 @@ def test_repeated_resume_is_idempotent(make_settings, db):
     sent = []
     bot = make_bot(settings, db, _record_handler(sent))
     bot.dispatch(_message_update(1, user_id=111, text="/resume"))  # already active
-    assert db.is_polling_enabled() is True
+    assert db.subscription_status_for(111) == "active"
     assert "이미" in sent[0]["text"]
 
 
-def test_pause_resume_log_actor_user_id(make_settings, db):
+def test_pause_does_not_touch_shared_polling(make_settings, db):
+    # A personal mute must never pause the shared SafeCity collection or the
+    # other operators — that is the core of the independent-operator model.
     settings = make_settings(telegram_allowed_user_ids=(111,))
     sent = []
     bot = make_bot(settings, db, _record_handler(sent))
     bot.dispatch(_message_update(1, user_id=111, text="/pause"))
     state = db.get_system_state()
-    assert state.paused_by == 111
-    assert db.run_history_count() == 1  # control event logged
+    assert db.is_polling_enabled() is True
+    assert state.paused_by is None
+    assert db.subscription_status_for(111) == "muted"
 
 
 def test_bot_remains_responsive_while_paused(make_settings, db, make_record):
@@ -280,6 +287,88 @@ def test_bot_remains_responsive_while_paused(make_settings, db, make_record):
     bot.dispatch(_message_update(3, user_id=111, text="/status"))
     bot.dispatch(_message_update(4, user_id=111, text="/resume"))
     assert len(sent) == 4  # every command still got a reply
+
+
+# -- personal subscription commands -------------------------------------------
+
+
+def test_subscribe_activates_this_chat(make_settings, db):
+    settings = make_settings(telegram_allowed_user_ids=(111,))
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+    bot.dispatch(_message_update(1, user_id=111, text="/unsubscribe", chat_id=200))
+    bot.dispatch(_message_update(2, user_id=111, text="/subscribe", chat_id=200))
+    assert db.subscription_status_for(111) == "active"
+    assert db.get_subscription_by_user(111).chat_id == "200"
+
+
+def test_unsubscribe_stops_delivery(make_settings, db):
+    settings = make_settings(telegram_allowed_user_ids=(111,))
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+    bot.dispatch(_message_update(1, user_id=111, text="/status"))  # auto-registers active
+    bot.dispatch(_message_update(2, user_id=111, text="/unsubscribe"))
+    assert db.subscription_status_for(111) == "unsubscribed"
+    assert db.list_active_subscriptions((111,)) == []
+
+
+def test_mute_and_unmute_roundtrip(make_settings, db):
+    settings = make_settings(telegram_allowed_user_ids=(111,))
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+    bot.dispatch(_message_update(1, user_id=111, text="/mute"))
+    assert db.subscription_status_for(111) == "muted"
+    assert "음소거" in sent[0]["text"]
+    bot.dispatch(_message_update(2, user_id=111, text="/unmute"))
+    assert db.subscription_status_for(111) == "active"
+
+
+def test_two_operators_have_independent_subscription_state(make_settings, db):
+    settings = make_settings(telegram_allowed_user_ids=(111, 222))
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+    bot.dispatch(_message_update(1, user_id=111, text="/status", chat_id=200))
+    bot.dispatch(_message_update(2, user_id=222, text="/status", chat_id=300))
+    bot.dispatch(_message_update(3, user_id=111, text="/mute", chat_id=200))
+    # Muting operator 111 must not affect operator 222.
+    assert db.subscription_status_for(111) == "muted"
+    assert db.subscription_status_for(222) == "active"
+    assert [s.user_id for s in db.list_active_subscriptions((111, 222))] == [222]
+
+
+# -- private-chat-only enforcement --------------------------------------------
+
+
+def test_group_message_is_rejected_and_not_processed(make_settings, db):
+    settings = make_settings(telegram_allowed_user_ids=(111,))
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+    outcome = bot.dispatch(
+        _message_update(1, user_id=111, text="/status", chat_id=-400, chat_type="supergroup")
+    )
+    assert outcome.authorized is True
+    assert len(sent) == 1
+    assert sent[0]["chat_id"] == "-400"  # rejection stays in the group
+    assert "개인 채팅" in sent[0]["text"]
+    # Not processed: no subscription is created for the group chat/user.
+    assert db.subscription_status_for(111) == "none"
+    assert db.get_subscription_by_chat(-400) is None
+
+
+# -- /status shows personal + shared sections ---------------------------------
+
+
+def test_status_has_personal_and_shared_sections(make_settings, db):
+    settings = make_settings(telegram_allowed_user_ids=(111, 222))
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+    bot.dispatch(_message_update(1, user_id=111, text="/status", chat_id=200))
+    text = sent[0]["text"]
+    assert "내 알림 상태" in text
+    assert "공통 수집 상태" in text
+    # Never leaks another operator's id/chat.
+    assert "222" not in text
+    assert "300" not in text
 
 
 # -- /help and unknown/dev commands -------------------------------------------

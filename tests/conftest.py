@@ -56,6 +56,7 @@ def build_settings(**overrides) -> Settings:
         openai_timeout_seconds=30.0,
         openai_max_retries=2,
         telegram_slow_interaction_ms=2000,
+        telegram_ai_workers=2,
     )
     defaults.update(overrides)
     return Settings(**defaults)

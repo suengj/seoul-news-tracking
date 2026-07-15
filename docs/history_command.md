@@ -46,7 +46,12 @@ Empty DB → `저장된 재난문자가 없습니다.`
 Missing/expired row → safe “기록을 찾을 수 없습니다” message; no fallback to
 the newest record.
 
-## Shared groups
+## Private-chat only (v0.4.0)
 
-If `/history` is used in a group, every member sees the reply. Prefer private
-chats for per-operator isolation (see `docs/telegram_routing_validation.md`).
+`/history` is an operational command, so like every other operational command
+it works only in a private chat with an authorized operator. Used in a group
+it is acknowledged and rejected in place with `[개인 채팅에서 사용해 주세요] …`
+and never processed — there is no per-group history view. Each operator's
+`/history` reply targets only their own private chat (see
+`docs/telegram_routing_validation.md` and
+`docs/independent_operator_model.md`).

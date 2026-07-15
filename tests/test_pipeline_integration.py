@@ -64,6 +64,15 @@ def test_template_pipeline_failure_never_blocks_original_alert(env_setup, monkey
     monkeypatch.setattr(poll_once, "TelegramSender", FailingRecommendSender)
     assert poll_once.main(["--send"]) == 0
 
+    # v0.4.0: automatic delivery fans out to active subscriptions; register one
+    # so the genuinely-new record below has a recipient.
+    from app.database import Database
+
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "111")
+    _sub_db = Database(env_setup)
+    _sub_db.set_subscription_status(user_id=111, chat_id=111, status="active")
+    _sub_db.close()
+
     record = make_record(source_id="DS-FAIL", body="폭염주의보 발효 중")
 
     def _fetch_one(**kwargs):

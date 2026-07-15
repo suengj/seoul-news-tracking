@@ -12,26 +12,36 @@ No automatic template selection, no automatic publishing anywhere, no X
 posting, no server/VPS deployment yet (see "Known limitations" below and
 `docs/local_runtime.md`).
 
+Since **v0.4.0** every authorized operator is an equal, independent entity:
+the SafeCity collector and `messages` DB stay shared, but automatic delivery,
+commands, previews, decisions, AI, and mute/subscribe state are fully
+personal. There is no primary operator and no default chat — see
+`docs/independent_operator_model.md`.
+
 ## Setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env   # then fill in TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
+cp .env.example .env   # then fill in TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USER_IDS
 ```
 
 `.env` is never committed (see `.gitignore`). See `docs/telegram_setup.md`
-for how to obtain a bot token and chat ID. On-demand AI extraction
+for how to obtain a bot token. On-demand AI extraction
 (`AI_ENABLED`/`OPENAI_API_KEY`) is optional and off by default — see
 "On-demand AI" below.
 
-`TELEGRAM_CHAT_ID` is the automatic-broadcast destination only. Every
-interactive request (`/latest`, `/history`, ordinary text, `/status`, `/pause`,
-`/resume`, `/help`, any template/preview/history button) always replies to the chat
-it came from instead — see `docs/service_v1.md` "Broadcast vs. interactive
-delivery" and `docs/telegram_routing_validation.md`. Current version: see
-`docs/versioning.md` (also shown in `/status` and the bot's startup log).
+`TELEGRAM_ALLOWED_USER_IDS` are the operators; each starts their own personal
+automatic delivery simply by messaging the bot in a private chat (or with
+`/subscribe`). `TELEGRAM_SEND_ENABLED` is the global master switch for all
+automatic delivery. `TELEGRAM_CHAT_ID` is **legacy migration/bootstrap only** —
+it is no longer the automatic target and is never an interactive fallback.
+Every command and button is private-chat only and always replies to the chat
+it came from — see `docs/independent_operator_model.md`,
+`docs/service_v1.md`, and `docs/telegram_routing_validation.md`. Current
+version: see `docs/versioning.md` (also shown in `/status` and the bot's
+startup log).
 
 ## Commands
 
@@ -71,8 +81,9 @@ python -m app.commands.cleanup_database --confirm
 python -m app.commands.send_telegram_test --confirm
 ```
 
-See `docs/local_runtime.md` for the poller/bot process model, pause/resume,
-and SQLite concurrency details.
+See `docs/local_runtime.md` for the poller/bot process model, personal
+mute/subscribe (`/pause` and `/resume` are personal `/mute`/`/unmute`
+aliases), and SQLite concurrency details.
 
 ### Service v1: template selection, preview, confirm/cancel/AI
 
@@ -143,21 +154,31 @@ send was run separately and is recorded in `docs/part1_completion_report.md`.
 Core: `messages` (each record's `internal_id`, `source_id`,
 `sender_or_region`, `sent_at`, `original_body` verbatim, `source_url`,
 `detected_at`, `raw_hash`, `telegram_status`, `telegram_message_id`,
-`is_baseline`), `run_history`, `tombstones`, `system_state`. See
-`app/models.py` and `app/database.py`.
+`is_baseline`), `run_history`, `tombstones`, `system_state`. Since v0.4.0
+`messages.telegram_status`/`telegram_message_id` are backward-compatible
+aggregates derived from `telegram_deliveries`. See `app/models.py` and
+`app/database.py`.
+
+Independent operators (v0.4.0, see `docs/independent_operator_model.md`):
+`telegram_subscriptions` (one equal, independent subscription per authorized
+operator — `active`/`muted`/`unsubscribed`), `telegram_deliveries` (one
+per-recipient automatic-delivery row per `(message, subscription)`, the source
+of truth for delivery/retry).
 
 Service v1 template flow (see `docs/service_v1.md`,
 `docs/database_retention.md`): `template_suggestions` (rule-engine hint,
-informational only), `template_actions` (one row per selection button
-press), `template_previews` (one row per shown preview — the addressable
-object confirm/cancel/AI act on), `template_decisions` (one row per
-message, `UPSERT`ed only by an explicit ✅ 최종 OK — the authoritative
-result, including an immutable snapshot of the source message's
-id/sender-region/sent-time/full body at confirmation time), `ai_generations`
-(one row per on-demand AI attempt, never the API key). The last three are
-never pruned by retention cleanup, even after their source `messages` row
-is deleted — and `template_decisions`' own snapshot means the full original
-text is never lost either.
+informational only), `template_actions` (one row per selection button press,
+with `interaction_chat_id`), `template_previews` (one row per shown preview —
+the addressable object confirm/cancel/AI act on, scoped to the operator+chat),
+`template_decisions` (one row per **operator+chat** for a message —
+`UNIQUE(message_id, confirmed_by, interaction_chat_id)`, `UPSERT`ed only by an
+explicit ✅ 최종 OK — the authoritative result, including an immutable snapshot
+of the source message's id/sender-region/sent-time/full body at confirmation
+time), `ai_generations` (one row per on-demand AI attempt, with
+`interaction_chat_id`, never the API key). The last three are never pruned by
+retention cleanup, even after their source `messages` row is deleted — and
+`template_decisions`' own snapshot means the full original text is never lost
+either.
 
 ## Project layout
 

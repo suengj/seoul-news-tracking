@@ -82,7 +82,15 @@ cheap even at a year's retention.
 `template_suggestions`, `template_actions`, `template_previews`,
 `template_decisions`, and `ai_generations` are **not** touched by
 `cleanup_preview()`/`cleanup_execute()` at all — only `messages`,
-`run_history`, and `tombstones` are. This is deliberate, not an oversight:
+`run_history`, and `tombstones` are. This is deliberate, not an oversight.
+
+> **v0.4.0.** These tables are now per operator+chat: `template_decisions`
+> uses `UNIQUE(message_id, confirmed_by, interaction_chat_id)` (so several
+> operators can hold coexisting decisions for one source message), and
+> `template_actions`/`ai_generations` carry `interaction_chat_id`. The
+> per-recipient `telegram_deliveries` table (source of truth for automatic
+> delivery/retry) and `telegram_subscriptions` are likewise **not** pruned by
+> retention today. See `docs/independent_operator_model.md`.
 
 - A confirmed `template_decisions` row is the future automation ground
   truth (see `docs/service_v1.md`) and must outlive the source message's

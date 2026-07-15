@@ -6,7 +6,17 @@ picture and `docs/template_engine.md` for the rule/extraction/rendering
 logic itself.
 
 See `docs/history_command.md` for `/history` and
-`docs/telegram_routing_validation.md` for Broadcast vs interactive diagnosis.
+`docs/telegram_routing_validation.md` for automatic vs interactive diagnosis.
+
+> **v0.4.0 — independent operators.** Every operator drives this flow in their
+> own private chat, fully isolated. Previews are scoped by
+> `(message_id, selected_by, interaction_chat_id)` and decisions are unique per
+> `(message_id, confirmed_by, interaction_chat_id)`, so operators A and B can
+> hold coexisting previews and decisions for the same source message without
+> superseding each other. Operational callbacks are private-chat only; a group
+> action is acked and rejected in place. AI generation runs on a bounded worker
+> pool (`TELEGRAM_AI_WORKERS`) so one operator's slow AI never blocks another's
+> button press. See `docs/independent_operator_model.md`.
 
 ## Excel catalog (v0.2.0)
 
@@ -137,11 +147,15 @@ Every callback response (selection preview, confirm, cancel, AI) is sent to
 `interaction_chat_id` — `callback_query.message.chat.id`, the chat the
 pressed button's message actually lives in — never `TELEGRAM_CHAT_ID`. A
 callback missing that field is acknowledged (so the spinner stops) and
-dropped, with no default-chat fallback. `template_previews` records this
-chat id (`interaction_chat_id`), and confirm/cancel/AI each require the
-current callback's chat_id *and* user_id to match it/`selected_by` before
-acting — see docs/service_v1.md "Preview ownership" for the exact rejection
-behavior on a mismatch.
+dropped, with no default-chat fallback. Since v0.4.0 the callback must also
+come from a **private** chat and an allowed operator; a group callback is
+acked and rejected in place with `[개인 채팅에서 사용해 주세요] …` and never
+processed. `template_previews` records this chat id (`interaction_chat_id`),
+and confirm/cancel/AI each require the current callback's chat_id *and*
+user_id to match it/`selected_by` before acting — so a preview created by
+operator A in chat A can only be confirmed by operator A in chat A. See
+docs/service_v1.md "Preview ownership" for the exact rejection behavior on a
+mismatch.
 
 ### Incomplete preview format
 
@@ -238,6 +252,14 @@ text still attached, not just its `message_id` — see
 `docs/database_retention.md`. A pre-existing database (created before these
 columns existed) migrates them in automatically via `ALTER TABLE` on
 startup; older rows just have `NULL` snapshots.
+
+Since v0.4.0 the decision key is `(message_id, confirmed_by,
+interaction_chat_id)`, not `message_id` alone. A database created before this
+change is migrated in place on startup: `template_decisions` is rebuilt with an
+`interaction_chat_id NOT NULL` column (recovered from the owning
+`template_previews` row, falling back to the literal `'legacy'`) and the new
+`UNIQUE(message_id, confirmed_by, interaction_chat_id)` constraint, preserving
+every existing row and snapshot. The migration is idempotent.
 
 ## Duplicate-callback guard
 

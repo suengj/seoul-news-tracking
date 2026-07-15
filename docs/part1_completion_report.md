@@ -376,3 +376,45 @@ Cross-user private-chat isolation remains enforced; shared-group visibility
 is documented as expected Telegram behavior (see
 `docs/telegram_routing_validation.md`). Live two-user private-chat check is
 required before tagging `v0.3.0`.
+
+## 0.4.0: independent Telegram operators
+
+Every authorized operator became an equal, independent entity. The SafeCity
+collector and `messages` DB stay shared; delivery, commands, previews,
+decisions, AI, and mute/subscribe state are now fully personal. There is no
+primary/default chat concept — `TELEGRAM_CHAT_ID` degrades to legacy
+migration/bootstrap only.
+
+- **Personal subscriptions** (`telegram_subscriptions`): every authorized
+  private interaction registers/touches a subscription; a bootstrap seeds
+  peers from historical private previews (and, only when unambiguous, the
+  legacy `TELEGRAM_CHAT_ID`). Never seeds groups or guesses an owner.
+- **Per-recipient automatic delivery** (`telegram_deliveries`): the poller
+  fans a new alert out to every active personal subscription with independent
+  per-recipient delivery/retry; one recipient's failure never blocks another;
+  no `TELEGRAM_CHAT_ID` fallback and no backfill for later subscribers.
+  `messages.telegram_status`/`telegram_message_id` are kept as derived
+  aggregates for compatibility.
+- **Private-chat-only operation**: operational commands and buttons are
+  rejected in groups with `[개인 채팅에서 사용해 주세요] …` (acked, never
+  processed, never rerouted).
+- **Personal commands**: `/subscribe`, `/unsubscribe`, `/mute`, `/unmute`;
+  `/pause`→`/mute` and `/resume`→`/unmute` aliases that no longer touch shared
+  polling. `/status` shows separate personal and shared-collection sections.
+- **Preview/decision isolation**: previews scoped by
+  `(message_id, selected_by, interaction_chat_id)`; decisions unique per
+  `(message_id, confirmed_by, interaction_chat_id)` (existing DBs migrated in
+  place, idempotently). `template_actions`/`ai_generations` carry
+  `interaction_chat_id`.
+- **Non-blocking AI**: a bounded `ThreadPoolExecutor` (`TELEGRAM_AI_WORKERS`,
+  default 2) runs AI generation off the poll loop; one operator's slow AI
+  never blocks another's button. AI results route only to the requesting
+  operator's chat; `[AI 요청 처리 불가]` on submit failure.
+- **Migration** validated on a copy of the production DB (all message/preview/
+  decision/AI/action rows preserved; new columns/tables added; old decisions
+  readable; idempotent). The offline validator was extended to 28
+  independent-operator checks (synthetic operators A/B + a group) and prints an
+  `Independent operator validation` PASS/FAIL block.
+
+See `docs/independent_operator_model.md` for the full model. A live
+two-operator private-chat check is required before tagging `v0.4.0`.

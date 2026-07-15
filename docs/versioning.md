@@ -14,13 +14,20 @@ It's surfaced in the Telegram bot's startup log and in `/status`.
   renaming an env var, a migration that isn't purely additive, a changed
   Telegram command contract).
 
+`0.4.0` (independent Telegram operators) is a **MINOR** release: the schema
+migration is additive plus an idempotent, decision-preserving rebuild of
+`template_decisions`; `TELEGRAM_CHAT_ID` is retained (now legacy-only) rather
+than removed; and existing commands keep working (`/pause`→`/mute`,
+`/resume`→`/unmute` aliases). See `docs/independent_operator_model.md`.
+
 ## Release steps
 
-Same as before. For 0.3.0 specifically: run
-`python -m app.commands.validate_telegram_behavior`, restart on merged main,
-perform the two-user private-chat check in
-`docs/telegram_routing_validation.md`, then tag `v0.3.0` only after live
-validation succeeds.
+Same as before. For 0.4.0 specifically: run
+`python -m app.commands.validate_telegram_behavior` (the extended
+independent-operator PASS/FAIL block), validate the migration on a **copy** of
+the production DB (never the real file), restart on merged main, perform the
+two-operator private-chat check in `docs/telegram_routing_validation.md`, then
+tag `v0.4.0` only after live validation succeeds.
 
 1. Update/add tests for the change.
 2. Update `CHANGELOG.md` (`[Unreleased]` -> a new dated version section).

@@ -98,6 +98,14 @@ def _fake_fetch(records):
     return _fetch
 
 
+def _add_active_subscription(db_path, *, user_id=111, chat_id=111):
+    """v0.4.0: automatic delivery fans out to active personal subscriptions,
+    not a single broadcast chat — so a recipient must exist to receive."""
+    db = Database(db_path)
+    db.set_subscription_status(user_id=user_id, chat_id=chat_id, status="active")
+    db.close()
+
+
 def test_dry_run_makes_no_db_writes_and_sends_nothing(env_setup, monkeypatch, capsys):
     monkeypatch.setattr(poll_once, "fetch_records", _fake_fetch(_records("DS1", "DS2")))
     monkeypatch.setattr(poll_once, "TelegramSender", FakeSender)
@@ -143,6 +151,11 @@ def test_new_records_sent_after_baseline_established(env_setup, monkeypatch):
     monkeypatch.setattr(poll_once, "TelegramSender", FakeSender)
     assert poll_once.main(["--send"]) == 0
 
+    # v0.4.0: register an active personal subscription so the new record has
+    # a recipient to fan out to.
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "111")
+    _add_active_subscription(env_setup)
+
     # Step 2: next poll sees an overlapping window (DS2 duplicate) plus one new record.
     senders = []
 
@@ -157,13 +170,20 @@ def test_new_records_sent_after_baseline_established(env_setup, monkeypatch):
 
     assert len(senders) == 1
     assert senders[0].sent_source_ids == ["DS3"]
+    # chat_id is stored/returned as TEXT (subscription table affinity)
+    assert senders[0].sent_chat_ids == ["111"]
 
     db = Database(env_setup)
     assert db.known_source_ids() == {"DS1", "DS2", "DS3"}
+    # exactly one per-recipient delivery (for DS3), marked sent
+    deliveries = db._conn.execute("SELECT * FROM telegram_deliveries").fetchall()
+    assert len(deliveries) == 1
+    assert deliveries[0]["status"] == "sent"
     db.close()
 
 
 def test_notify_existing_sends_baseline_on_first_run(env_setup, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "111")
     monkeypatch.setattr(poll_once, "fetch_records", _fake_fetch(_records("DS1", "DS2")))
     senders = []
 
@@ -173,8 +193,11 @@ def test_notify_existing_sends_baseline_on_first_run(env_setup, monkeypatch):
         return s
 
     monkeypatch.setattr(poll_once, "TelegramSender", sender_factory)
+    # An active subscription must exist before this run for baseline delivery.
+    _add_active_subscription(env_setup)
 
     rc = poll_once.main(["--send", "--notify-existing"])
     assert rc == 0
     assert len(senders) == 1
     assert set(senders[0].sent_source_ids) == {"DS1", "DS2"}
+    assert senders[0].sent_chat_ids == ["111", "111"]

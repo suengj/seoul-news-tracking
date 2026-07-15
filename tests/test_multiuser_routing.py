@@ -63,12 +63,12 @@ def _record_handler(sent: list[dict]):
     return handler
 
 
-def _message_update(update_id, user_id, text, *, chat_id, message_id=None):
+def _message_update(update_id, user_id, text, *, chat_id, message_id=None, chat_type="private"):
     return {
         "update_id": update_id,
         "message": {
             "message_id": message_id or update_id * 10,
-            "chat": {"id": chat_id},
+            "chat": {"id": chat_id, "type": chat_type},
             "from": {"id": user_id},
             "text": text,
         },
@@ -116,20 +116,24 @@ class FakeSender:
         return TelegramSendOutcome(status=TelegramStatus.TELEGRAM_SENT, message_ids=["1"])
 
 
-def _tpl_callback(message_id, template_id, *, user_id, chat_id, cbq_id="cbq1") -> dict:
+def _tpl_callback(
+    message_id, template_id, *, user_id, chat_id, cbq_id="cbq1", chat_type="private"
+) -> dict:
     return {
         "id": cbq_id,
         "from": {"id": user_id},
-        "message": {"chat": {"id": chat_id}},
+        "message": {"chat": {"id": chat_id, "type": chat_type}},
         "data": make_callback_data(message_id, template_id),
     }
 
 
-def _preview_callback(preview_id, action, *, user_id, chat_id, cbq_id="cbq-p1") -> dict:
+def _preview_callback(
+    preview_id, action, *, user_id, chat_id, cbq_id="cbq-p1", chat_type="private"
+) -> dict:
     return {
         "id": cbq_id,
         "from": {"id": user_id},
-        "message": {"chat": {"id": chat_id}},
+        "message": {"chat": {"id": chat_id, "type": chat_type}},
         "data": make_preview_callback_data(preview_id, action),
     }
 
@@ -431,22 +435,32 @@ def test_history_select_does_not_broadcast_or_insert_suggestion(db, settings, ma
     assert all(e is False for e in sender.sent_enforce_send_enabled)
 
 
-def test_shared_group_preview_stays_in_group_chat(db, settings, make_record):
-    """Case B: both operators in one group — replies go to that group chat_id."""
-    group_chat = 400
+def test_group_preview_is_rejected_and_not_processed(db, settings, make_record):
+    """v0.4.0: operations are strictly private-chat only. A template-selection
+    callback from a group is acknowledged and rejected in-place — never
+    processed, never rerouted, and no preview is created."""
+    group_chat = -400  # negative id = group/supergroup
     message_id = db.insert(make_record(source_id="GRP1", body="호우주의보 해제 [테스트구]"))
     sender = FakeSender()
     dispatch_callback(
         db,
         settings,
         sender,
-        _tpl_callback(message_id, "HW-05", user_id=USER_A_ID, chat_id=group_chat, cbq_id="g1"),
+        _tpl_callback(
+            message_id,
+            "HW-05",
+            user_id=USER_A_ID,
+            chat_id=group_chat,
+            cbq_id="g1",
+            chat_type="supergroup",
+        ),
     )
-    assert sender.sent_chat_ids == [group_chat]
-    preview = db._conn.execute(
-        "SELECT interaction_chat_id FROM template_previews ORDER BY preview_id DESC LIMIT 1"
-    ).fetchone()
-    assert preview["interaction_chat_id"] == str(group_chat)
+    assert sender.answered == ["g1"]  # spinner still stops
+    assert sender.sent_chat_ids == [group_chat]  # rejection stays in the group
+    assert "[개인 채팅에서 사용해 주세요]" in sender.sent_texts[-1]
+    # Nothing was processed: no preview, no action, no decision.
+    assert db._conn.execute("SELECT COUNT(*) AS c FROM template_previews").fetchone()["c"] == 0
+    assert db._conn.execute("SELECT COUNT(*) AS c FROM template_actions").fetchone()["c"] == 0
 
 
 def test_send_disabled_blocks_broadcast_but_not_interactive(db, make_settings, make_record):

@@ -37,6 +37,7 @@ MESSAGE_RETENTION_DAYS_RANGE = (1, 3650)
 RUN_HISTORY_RETENTION_DAYS_RANGE = (1, 365)
 CLEANUP_INTERVAL_HOURS_RANGE = (1, 168)
 TOMBSTONE_RETENTION_DAYS_RANGE = (1, 3650)
+TELEGRAM_AI_WORKERS_RANGE = (1, 4)
 
 
 class ConfigError(ValueError):
@@ -104,6 +105,10 @@ class Settings:
 
     # Non-AI interactive actions exceeding this emit a WARNING (logs only).
     telegram_slow_interaction_ms: int = 2000
+
+    # Bounded thread pool for on-demand AI generation so one operator's AI
+    # call never blocks another operator's non-AI commands (v0.4.0).
+    telegram_ai_workers: int = 2
 
     @property
     def telegram_configured(self) -> bool:
@@ -209,4 +214,9 @@ def load_settings(env_file: Path | None = None) -> Settings:
         openai_timeout_seconds=float(os.environ.get("OPENAI_TIMEOUT_SECONDS", "30")),
         openai_max_retries=int(os.environ.get("OPENAI_MAX_RETRIES", "2")),
         telegram_slow_interaction_ms=int(os.environ.get("TELEGRAM_SLOW_INTERACTION_MS", "2000")),
+        telegram_ai_workers=_parse_int_in_range(
+            "TELEGRAM_AI_WORKERS",
+            os.environ.get("TELEGRAM_AI_WORKERS", "2"),
+            TELEGRAM_AI_WORKERS_RANGE,
+        ),
     )

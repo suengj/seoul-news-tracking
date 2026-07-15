@@ -5,26 +5,34 @@ webhook migration note). One `getUpdates` offset sequence handles both:
 
 - ordinary messages: authorize against TELEGRAM_ALLOWED_USER_IDS (never by
   chat ID alone), reply to `/latest`, ordinary text (same as `/latest`),
-  `/status`, `/pause`, `/resume`, `/help`, and an optional dev-only
-  `/shutdown`
+  `/status`, `/subscribe`, `/unsubscribe`, `/mute`, `/unmute`, `/pause`
+  (alias of `/mute`), `/resume` (alias of `/unmute`), `/help`, and an
+  optional dev-only `/shutdown`
 - `callback_query` updates (template selection, preview confirm/cancel/AI) —
   delegated to `app.template_flow.dispatch_callback`, which does its own
-  authorization and duplicate-callback checks
+  authorization, private-chat, and duplicate-callback checks
 
-Every one of the above is an **interactive reply**: it always targets the
-chat_id the inbound message/callback actually came from, never the
-configured broadcast `TELEGRAM_CHAT_ID` — see docs/service_v1.md.
+Every one of the above is a **personal interactive reply**: it always targets
+the chat_id the inbound message/callback actually came from, never the legacy
+`TELEGRAM_CHAT_ID` — see docs/independent_operator_model.md.
+
+Operations are strictly private-chat only (v0.4.0): a command or button used
+in a group/supergroup/channel is rejected with a hint and never processed or
+rerouted. Every authorized operator is an equal, independent entity — each
+subscribes from their own private chat and receives every alert
+independently. On-demand AI runs on a bounded worker pool so one operator's
+AI request never blocks another operator's non-AI command.
 
 Never crashes the loop on malformed/unsupported update types. This module
-does not decide *when* to poll Seoul SafeCity — that is app/poller.py's
-job. The two communicate only through the shared SQLite `system_state` row
-(polling_enabled) and the `messages` table.
+does not decide *when* to poll Seoul SafeCity — that is app/poller.py's job.
+The two communicate only through the shared SQLite tables.
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -68,20 +76,37 @@ INITIAL_BACKOFF_SECONDS = 1.0
 
 UNAUTHORIZED_REPLY = escape_markdown_v2("이 봇을 사용할 권한이 없습니다.")
 HELP_TEXT = escape_markdown_v2(
-    "사용 가능한 명령어:\n"
+    "사용 가능한 명령어\n"
+    "\n"
+    "[조회]\n"
     "/latest - 가장 최근 재난문자 조회\n"
     "/history - 최근 재난문자 10건 선택\n"
-    "/status - 시스템 상태 조회\n"
-    "/pause - 자동 수집 및 알림 일시정지\n"
-    "/resume - 자동 수집 및 알림 재개\n"
+    "/status - 내 알림 상태 및 공통 수집 상태 조회\n"
+    "\n"
+    "[내 알림 설정]\n"
+    "/subscribe - 이 개인 채팅으로 자동 알림 수신 시작\n"
+    "/unsubscribe - 자동 알림 수신 중지 (구독 해제)\n"
+    "/mute - 자동 알림 일시 음소거\n"
+    "/unmute - 음소거 해제\n"
+    "/pause - /mute 와 동일 (개인 음소거)\n"
+    "/resume - /unmute 와 동일 (음소거 해제)\n"
+    "\n"
+    "[기타]\n"
     "/help - 도움말\n"
-    "일반 텍스트 메시지를 보내도 /latest와 동일하게 동작합니다."
+    "\n"
+    "안내\n"
+    "- 모든 운영 명령과 버튼은 봇과의 1:1 개인 채팅에서만 동작합니다.\n"
+    "- 운영자는 각자 독립적으로 알림을 받고, 템플릿/미리보기/AI/최종 결정을 각자 관리합니다.\n"
+    "- 일반 텍스트 메시지를 보내도 /latest와 동일하게 동작합니다."
 )
 SHUTDOWN_DISABLED_REPLY = escape_markdown_v2(
     "개발용 종료 명령이 비활성화되어 있습니다 (LOCAL_SHUTDOWN_COMMAND_ENABLED=false)."
 )
 SHUTDOWN_ACCEPTED_REPLY = escape_markdown_v2(
     "개발용 종료 명령을 수신했습니다. 봇 프로세스를 종료합니다."
+)
+PRIVATE_CHAT_ONLY_REPLY = escape_markdown_v2(
+    "운영 명령과 버튼은 봇과의 1:1 개인 채팅에서만 동작합니다. 그룹/채널에서는 처리되지 않습니다."
 )
 
 
@@ -101,12 +126,59 @@ class DispatchOutcome:
 SEOUL_TZ = ZoneInfo("Asia/Seoul")
 
 
-def build_status_reply(db: Database, settings: Settings, *, now: datetime | None = None) -> str:
+_PERSONAL_STATUS_LABEL = {
+    "active": "수신 중",
+    "muted": "일시정지 (음소거)",
+    "unsubscribed": "구독 해제",
+    "none": "미등록",
+}
+
+
+def _format_iso(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        return format_timestamp(datetime.fromisoformat(value))
+    except ValueError:
+        return None
+
+
+def build_status_reply(
+    db: Database,
+    settings: Settings,
+    *,
+    user_id: int | None = None,
+    chat_id: int | None = None,
+    now: datetime | None = None,
+) -> str:
+    """Two independent sections: the caller's OWN personal alert status and
+    the shared common-collection status. Never exposes another operator's
+    IDs or state — only the requesting user's own subscription/delivery is
+    read (v0.4.0)."""
     now = now or datetime.now(tz=SEOUL_TZ)
     state = db.get_system_state()
     report = db.status_report()
 
-    lines = ["\\[Seoul News Tracking 상태\\]", ""]
+    lines: list[str] = ["\\[내 알림 상태\\]", ""]
+    if user_id is None:
+        lines.append(escape_markdown_v2("알림 수신: 확인 불가 (사용자 식별 실패)"))
+    else:
+        status = db.subscription_status_for(user_id)
+        lines.append(escape_markdown_v2(f"알림 수신: {_PERSONAL_STATUS_LABEL.get(status, status)}"))
+        sub = db.get_subscription_by_user(user_id)
+        lines.append(
+            escape_markdown_v2(f"개인 채팅 등록: {'등록됨' if sub is not None else '미등록'}")
+        )
+        latest = db.get_latest_delivery_for_user(user_id)
+        sent_ts = _format_iso(latest["sent_at"]) if latest is not None else None
+        lines.append(escape_markdown_v2(f"최근 자동 발송: {sent_ts if sent_ts else '없음'}"))
+        if latest is not None and latest["status"] == "failed":
+            lines.append(escape_markdown_v2(f"최근 발송 오류: {latest['error'] or '오류'}"))
+        else:
+            lines.append(escape_markdown_v2("최근 발송 오류: 없음"))
+
+    lines.append("")
+    lines.append("\\[공통 수집 상태\\]")
     lines.append(escape_markdown_v2(f"버전: {get_version()}"))
 
     if not state.polling_enabled:
@@ -168,13 +240,35 @@ class TelegramBotRunner:
             ),
             transport=transport,
         )
+        # Bounded pool for on-demand AI generation so one operator's AI call
+        # never blocks another operator's non-AI commands (v0.4.0).
+        self._ai_executor = ThreadPoolExecutor(
+            max_workers=settings.telegram_ai_workers,
+            thread_name_prefix="ai-preview",
+        )
+        # One-time subscription bootstrap from historical previews / legacy
+        # TELEGRAM_CHAT_ID (no-op once telegram_subscriptions is populated).
+        try:
+            seeded = db.seed_subscriptions_if_empty(
+                allowed_user_ids=settings.telegram_allowed_user_ids,
+                legacy_chat_id=settings.telegram_chat_id or None,
+            )
+            if seeded:
+                logger.info("seeded %d initial personal subscription(s)", seeded)
+        except Exception:
+            logger.exception("subscription bootstrap failed (continuing)")
         self._offset = db.get_telegram_update_offset()
         self._running = True
         logger.info(
-            "Telegram bot starting: version=%s persisted_offset=%d", get_version(), self._offset
+            "Telegram bot starting: version=%s persisted_offset=%d ai_workers=%d",
+            get_version(),
+            self._offset,
+            settings.telegram_ai_workers,
         )
 
     def close(self) -> None:
+        # Let in-flight AI tasks finish (bounded, short) before tearing down.
+        self._ai_executor.shutdown(wait=True)
         self._client.close()
         if self._owns_sender:
             self.sender.close()
@@ -251,7 +345,13 @@ class TelegramBotRunner:
 
         callback_query = update.get("callback_query")
         if isinstance(callback_query, dict):
-            dispatch_callback(self.db, self.settings, self.sender, callback_query)
+            dispatch_callback(
+                self.db,
+                self.settings,
+                self.sender,
+                callback_query,
+                ai_executor=self._ai_executor,
+            )
             return DispatchOutcome(handled=True, authorized=None, command="callback_query")
 
         message = update.get("message")
@@ -300,6 +400,37 @@ class TelegramBotRunner:
             )
             return DispatchOutcome(handled=True, authorized=False, command=command)
 
+        # Operations are private-chat only. An authorized operator in a group/
+        # supergroup/channel is told to use a private chat — never processed,
+        # never rerouted to a private chat.
+        if chat_type != "private":
+            self._reply(chat_id, message_id, PRIVATE_CHAT_ONLY_REPLY)
+            log_telegram_route(
+                action=command_category,
+                delivery_mode="interactive",
+                outcome="group_rejected",
+                elapsed_ms=elapsed_ms_since(started),
+                chat_type=chat_type,
+                update_id=update_id,
+                operator_user_id=user_id,
+                routed_chat_id=chat_id,
+                slow_threshold_ms=threshold,
+            )
+            return DispatchOutcome(handled=True, authorized=True, command=command)
+
+        # Every authorized private interaction touches this operator's own
+        # subscription (created active on first contact; a muted/unsubscribed
+        # operator is never silently reactivated).
+        try:
+            self.db.register_or_touch_subscription(
+                user_id=user_id,
+                chat_id=chat_id,
+                chat_type="private",
+                registration_source="message",
+            )
+        except Exception:
+            logger.exception("failed to touch subscription for user_id=%s", user_id)
+
         reply_text = self._handle_authorized(stripped, command, user_id, chat_id, message_id)
         if reply_text is not None:
             self._reply(chat_id, message_id, reply_text)
@@ -326,11 +457,17 @@ class TelegramBotRunner:
             self._send_history(chat_id)
             return None
         if command == "/status":
-            return build_status_reply(self.db, self.settings)
-        if command == "/pause":
-            return self._handle_pause(user_id)
-        if command == "/resume":
-            return self._handle_resume(user_id)
+            return build_status_reply(self.db, self.settings, user_id=user_id, chat_id=chat_id)
+        if command == "/subscribe":
+            return self._handle_subscribe(user_id, chat_id)
+        if command == "/unsubscribe":
+            return self._handle_unsubscribe(user_id, chat_id)
+        # /pause and /resume are personal aliases of /mute and /unmute — they
+        # no longer touch the shared polling state (v0.4.0).
+        if command in ("/mute", "/pause"):
+            return self._handle_mute(user_id, chat_id)
+        if command in ("/unmute", "/resume"):
+            return self._handle_unmute(user_id, chat_id)
         if command == "/help":
             return HELP_TEXT
         if command == "/shutdown":
@@ -350,25 +487,46 @@ class TelegramBotRunner:
         if outcome.status == TelegramStatus.TELEGRAM_FAILED:
             logger.error("failed to send /history to chat_id=%s: %s", chat_id, outcome.error)
 
-    def _handle_pause(self, user_id: int) -> str:
-        changed = self.db.pause_polling(actor_user_id=user_id)
-        self.db.record_control_event(
-            "pause", actor_user_id=user_id, detail="via telegram" if changed else "already paused"
-        )
-        logger.info("pause requested by user_id=%s (changed=%s)", user_id, changed)
-        if changed:
-            return escape_markdown_v2("자동 수집 및 알림을 일시정지했습니다.")
-        return escape_markdown_v2("이미 일시정지 상태입니다.")
+    def _handle_subscribe(self, user_id: int, chat_id: int) -> str:
+        """Start (or re-activate) personal automatic delivery to THIS chat."""
+        before = self.db.subscription_status_for(user_id)
+        self.db.set_subscription_status(user_id=user_id, chat_id=chat_id, status="active")
+        logger.info("subscribe by user_id=%s (was=%s)", user_id, before)
+        if before == "active":
+            return escape_markdown_v2("이미 자동 알림을 수신 중입니다.")
+        return escape_markdown_v2("이 개인 채팅으로 자동 알림을 받도록 설정했습니다.")
 
-    def _handle_resume(self, user_id: int) -> str:
-        changed = self.db.resume_polling(actor_user_id=user_id)
-        self.db.record_control_event(
-            "resume", actor_user_id=user_id, detail="via telegram" if changed else "already active"
+    def _handle_unsubscribe(self, user_id: int, chat_id: int) -> str:
+        """Stop personal automatic delivery entirely (구독 해제)."""
+        before = self.db.subscription_status_for(user_id)
+        self.db.set_subscription_status(user_id=user_id, chat_id=chat_id, status="unsubscribed")
+        logger.info("unsubscribe by user_id=%s (was=%s)", user_id, before)
+        if before in ("none", "unsubscribed"):
+            return escape_markdown_v2("이미 자동 알림을 받고 있지 않습니다.")
+        return escape_markdown_v2(
+            "자동 알림 수신을 해제했습니다. 다시 받으려면 /subscribe 를 보내주세요."
         )
-        logger.info("resume requested by user_id=%s (changed=%s)", user_id, changed)
-        if changed:
-            return escape_markdown_v2("자동 수집 및 알림을 재개했습니다.")
-        return escape_markdown_v2("이미 실행 중입니다.")
+
+    def _handle_mute(self, user_id: int, chat_id: int) -> str:
+        """Temporarily silence personal automatic delivery (개인 음소거).
+
+        Does NOT touch the shared polling state — only this operator's own
+        subscription. Other operators keep receiving alerts."""
+        before = self.db.subscription_status_for(user_id)
+        self.db.set_subscription_status(user_id=user_id, chat_id=chat_id, status="muted")
+        logger.info("mute by user_id=%s (was=%s)", user_id, before)
+        if before == "muted":
+            return escape_markdown_v2("이미 음소거 상태입니다.")
+        return escape_markdown_v2("자동 알림을 음소거했습니다. 해제하려면 /unmute 를 보내주세요.")
+
+    def _handle_unmute(self, user_id: int, chat_id: int) -> str:
+        """Resume personal automatic delivery after a mute."""
+        before = self.db.subscription_status_for(user_id)
+        self.db.set_subscription_status(user_id=user_id, chat_id=chat_id, status="active")
+        logger.info("unmute by user_id=%s (was=%s)", user_id, before)
+        if before == "active":
+            return escape_markdown_v2("이미 자동 알림을 수신 중입니다.")
+        return escape_markdown_v2("자동 알림 음소거를 해제했습니다.")
 
     def _handle_shutdown(self, user_id: int) -> str:
         if not self.settings.local_shutdown_command_enabled:

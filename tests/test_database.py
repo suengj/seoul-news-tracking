@@ -152,6 +152,9 @@ def test_update_preview_status_updates_fields(db, make_record):
 
 
 def test_upsert_decision_creates_then_updates_in_place(db, make_record):
+    # Same operator + same chat reconfirming a different preview updates the
+    # SAME decision row in place (v0.4.0 conflict key includes confirmed_by
+    # + interaction_chat_id).
     record = make_record(source_id="DS1")
     db.insert(record)
     decision_id_1 = db.upsert_decision(
@@ -162,6 +165,7 @@ def test_upsert_decision_creates_then_updates_in_place(db, make_record):
         final_rendered_text="첫 번째 문안",
         generation_method="rule",
         confirmed_by=111,
+        interaction_chat_id="100",
     )
     decision_id_2 = db.upsert_decision(
         message_id=record.internal_id,
@@ -170,14 +174,51 @@ def test_upsert_decision_creates_then_updates_in_place(db, make_record):
         final_slots_json="{}",
         final_rendered_text="두 번째 문안",
         generation_method="ai",
-        confirmed_by=222,
+        confirmed_by=111,
+        interaction_chat_id="100",
     )
     assert decision_id_1 == decision_id_2  # same row, updated in place
     assert db._conn.execute("SELECT COUNT(*) AS c FROM template_decisions").fetchone()["c"] == 1
-    row = db.get_decision_by_message_id(record.internal_id)
+    row = db.get_decision_for_operator(record.internal_id, 111, "100")
     assert row["final_template_id"] == "FLOOD_ADVISORY_ISSUED"
     assert row["generation_method"] == "ai"
-    assert row["confirmed_by"] == 222
+    assert row["confirmed_by"] == 111
+
+
+def test_upsert_decision_is_independent_per_operator_and_chat(db, make_record):
+    # Two different operators confirming the same source message create two
+    # independent, coexisting decisions — one never overwrites the other.
+    record = make_record(source_id="DS1")
+    db.insert(record)
+    id_a = db.upsert_decision(
+        message_id=record.internal_id,
+        preview_id=1,
+        final_template_id="HEAVY_RAIN_CLEARED",
+        final_slots_json="{}",
+        final_rendered_text="A안",
+        generation_method="rule",
+        confirmed_by=111,
+        interaction_chat_id="100",
+    )
+    id_b = db.upsert_decision(
+        message_id=record.internal_id,
+        preview_id=2,
+        final_template_id="FLOOD_ADVISORY_ISSUED",
+        final_slots_json="{}",
+        final_rendered_text="B안",
+        generation_method="ai",
+        confirmed_by=222,
+        interaction_chat_id="200",
+    )
+    assert id_a != id_b
+    assert db._conn.execute("SELECT COUNT(*) AS c FROM template_decisions").fetchone()["c"] == 2
+    assert len(db.list_decisions_for_message(record.internal_id)) == 2
+    assert db.get_decision_for_operator(record.internal_id, 111, "100")["final_template_id"] == (
+        "HEAVY_RAIN_CLEARED"
+    )
+    assert db.get_decision_for_operator(record.internal_id, 222, "200")["final_template_id"] == (
+        "FLOOD_ADVISORY_ISSUED"
+    )
 
 
 def test_ai_generation_insert_and_update(db, make_record):
@@ -223,6 +264,7 @@ def test_upsert_decision_stores_source_snapshots(db, make_record):
         final_rendered_text="문안",
         generation_method="rule",
         confirmed_by=111,
+        interaction_chat_id="100",
         source_id_snapshot=record.source_id,
         sender_or_region_snapshot=record.sender_or_region,
         sent_at_snapshot=record.sent_at.isoformat(),
@@ -245,6 +287,7 @@ def test_reconfirm_updates_snapshots_in_place(db, make_record):
         final_rendered_text="문안1",
         generation_method="rule",
         confirmed_by=111,
+        interaction_chat_id="100",
         source_id_snapshot=record.source_id,
         sender_or_region_snapshot=record.sender_or_region,
         sent_at_snapshot=record.sent_at.isoformat(),
@@ -260,6 +303,7 @@ def test_reconfirm_updates_snapshots_in_place(db, make_record):
         final_rendered_text="문안2",
         generation_method="rule",
         confirmed_by=111,
+        interaction_chat_id="100",
         source_id_snapshot=record.source_id,
         sender_or_region_snapshot=record.sender_or_region,
         sent_at_snapshot=record.sent_at.isoformat(),
@@ -321,6 +365,7 @@ def test_supersede_active_previews_only_affects_active_statuses_for_that_user(db
         rendered_text="x",
         missing_slots_json="[]",
         status="rule_preview",
+        interaction_chat_id="100",
     )
     confirmed_id = db.insert_preview(
         message_id=record.internal_id,
@@ -331,6 +376,7 @@ def test_supersede_active_previews_only_affects_active_statuses_for_that_user(db
         rendered_text="y",
         missing_slots_json="[]",
         status="confirmed",
+        interaction_chat_id="100",
     )
     other_user_active_id = db.insert_preview(
         message_id=record.internal_id,
@@ -341,13 +387,29 @@ def test_supersede_active_previews_only_affects_active_statuses_for_that_user(db
         rendered_text="z",
         missing_slots_json="[]",
         status="rule_preview",
+        interaction_chat_id="200",
+    )
+    # Same user in a DIFFERENT chat must not be superseded either.
+    same_user_other_chat_id = db.insert_preview(
+        message_id=record.internal_id,
+        selected_template_id="D",
+        selected_by=111,
+        extraction_method="rule",
+        extracted_slots_json="{}",
+        rendered_text="w",
+        missing_slots_json="[]",
+        status="rule_preview",
+        interaction_chat_id="999",
     )
 
-    db.supersede_active_previews(message_id=record.internal_id, selected_by=111)
+    db.supersede_active_previews(
+        message_id=record.internal_id, selected_by=111, interaction_chat_id="100"
+    )
 
     assert db.get_preview(active_id).status == "superseded"
     assert db.get_preview(confirmed_id).status == "confirmed"
     assert db.get_preview(other_user_active_id).status == "rule_preview"
+    assert db.get_preview(same_user_other_chat_id).status == "rule_preview"
 
 
 def test_confirmed_decision_survives_message_retention_cleanup(db, make_record):
@@ -365,6 +427,7 @@ def test_confirmed_decision_survives_message_retention_cleanup(db, make_record):
         final_rendered_text="보관될 문안",
         generation_method="rule",
         confirmed_by=111,
+        interaction_chat_id="100",
     )
 
     # Must not raise sqlite3.IntegrityError (FOREIGN KEY constraint failed).

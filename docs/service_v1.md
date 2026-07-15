@@ -2,13 +2,23 @@
 
 Current version: see `pyproject.toml` / `app/version.py` (also shown in the
 Telegram bot's startup log and `/status` reply) — see `docs/versioning.md`
-for the release process. As of this writing: **0.1.1**.
+for the release process. As of this writing: **0.4.0**.
 
 Service v1 integrates the recurring local poller and Telegram command bot
 (previously a separate branch) with the deterministic template engine
 (previously another separate branch) into one small, compact runtime. The
 core product decision: **a human always picks the template.** The system
 never auto-selects, auto-renders-and-sends, or auto-confirms anything.
+
+> **v0.4.0 — independent operators.** Every authorized operator is an equal,
+> independent entity operating in their own **private** chat. The SafeCity
+> collector and `messages` DB stay shared, but delivery, commands, previews,
+> decisions, AI, and mute/subscribe state are fully personal. Automatic alerts
+> fan out to every active personal subscription (`telegram_deliveries`), not to
+> one broadcast chat; `TELEGRAM_CHAT_ID` is now legacy migration/bootstrap only.
+> Operational actions are private-chat only (group actions are rejected in
+> place). See `docs/independent_operator_model.md` for the full model — the
+> sections below describe the underlying flow, which is unchanged per operator.
 
 ## The flow
 
@@ -43,20 +53,25 @@ Two distinct Telegram delivery concepts, both implemented on top of
 (`app/telegram_sender.py`) — never conflated, never a silent fallback from
 one to the other:
 
-| | Automatic broadcast | Interactive reply |
+| | Automatic personal delivery | Interactive reply |
 |---|---|---|
-| When | Poller detects a genuinely new SafeCity message (`app.commands.poll_once`) | `/latest`, `/history`, ordinary text, `/status`, `/pause`, `/resume`, `/help`, any callback (history, category, template, preview confirm/cancel/AI) |
-| Target chat | `TELEGRAM_CHAT_ID` (the configured broadcast chat), always | The chat_id the inbound message/callback actually came from — `message.chat.id` or `callback_query.message.chat.id` |
-| `TELEGRAM_SEND_ENABLED` | Honored — the flag gates this | Never honored — a direct reply to something an operator just did must never be silently dropped |
-| Persists `template_suggestions`? | Yes, once | No (a `/latest` replay never adds a second row) |
+| When | Poller detects a genuinely new SafeCity message (`app.commands.poll_once`) | `/latest`, `/history`, ordinary text, `/status`, `/subscribe`, `/unsubscribe`, `/mute`, `/unmute` (`/pause`/`/resume` aliases), `/help`, any callback (history, category, template, preview confirm/cancel/AI) |
+| Target chat | Every **active personal subscription** — fans out one `telegram_deliveries` row per operator's private chat (v0.4.0). Not `TELEGRAM_CHAT_ID`, which is legacy bootstrap only | The chat_id the inbound message/callback actually came from — `message.chat.id` or `callback_query.message.chat.id` |
+| `TELEGRAM_SEND_ENABLED` | Honored — the global master switch gates all automatic delivery | Never honored — a direct reply to something an operator just did must never be silently dropped |
+| Persists `template_suggestions`? | Yes, once per message (not once per recipient) | No (a `/latest` replay never adds a second row) |
 
 `app.template_flow.send_initial_alert(..., target_chat_id, persist_suggestion,
 enforce_send_enabled)` is the single function both paths call — the
 rendered text/keyboard are always byte-for-byte identical, only the target
 chat and persistence differ. `send_latest_alert` / `/history` always pass
-the inbound chat_id and `persist_suggestion=False`.
-`app.commands.poll_once` always passes `settings.telegram_chat_id` and
-`persist_suggestion=True`.
+the inbound chat_id and `persist_suggestion=False`. Since v0.4.0
+`app.commands.poll_once` no longer passes `settings.telegram_chat_id`; it
+loads active personal subscriptions and calls `send_initial_alert` once per
+recipient (`target_chat_id=sub.chat_id`), persisting the
+`template_suggestions` row on the first delivery only and tracking each
+recipient's outcome in `telegram_deliveries` (independent per-recipient
+retry). With no active subscriptions it stores the message and logs a WARNING
+— there is no `TELEGRAM_CHAT_ID` fallback.
 
 See also `docs/telegram_routing_validation.md` (Case A private chats vs Case B
 shared groups vs Case C Broadcast) and `docs/history_command.md`.
@@ -114,10 +129,13 @@ questions, and conflating them was the main thing this integration fixed:
 
 A template button press or a cancellation is **never** treated as a final
 label — only `template_decisions` is future automation ground truth.
-Re-confirming a different preview for the same message updates the existing
-`template_decisions` row in place (`message_id` is `UNIQUE`); the full
-history of what was tried is still reconstructable from `template_previews`
-alone, so no separate decision-history table was added (see
+Re-confirming a different preview for the same message updates that operator's
+existing `template_decisions` row in place. Since v0.4.0 the decision key is
+`UNIQUE(message_id, confirmed_by, interaction_chat_id)`, not `message_id`
+alone: operators A and B each keep their own coexisting decision for the same
+source message, and re-confirming only touches the confirming operator's row.
+The full history of what was tried is still reconstructable from
+`template_previews` alone, so no separate decision-history table was added (see
 `docs/database_retention.md` for why these tables are also exempt from
 message retention cleanup).
 
@@ -203,11 +221,11 @@ re-confirmed (idempotent resend) but never cancelled.
 - The rule engine's "실험적 추천" hint uses the same signal-group scoring as
   before; it is cosmetic-only now and never gates or auto-fills anything.
 - The active-preview supersede policy is scoped to `(message_id,
-  selected_by)` — if two different authorized operators both select
-  templates for the same message, each operator's own previews supersede
-  each other independently, not across operators. Each operator's preview is
-  also bound to the chat they selected it from (see "Preview ownership"
-  above), so this is a scoping choice, not a routing gap.
+  selected_by, interaction_chat_id)` (v0.4.0) — if two different authorized
+  operators both select templates for the same message, each operator's own
+  previews supersede each other independently, never across operators, and
+  only within the private chat they were selected in (see "Preview ownership"
+  above). This is a deliberate per-operator scoping choice, not a routing gap.
 
 ## Next phase (not in this session)
 

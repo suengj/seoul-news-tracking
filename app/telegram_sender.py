@@ -3,9 +3,12 @@ Service v1 template-selection / preview / confirm / cancel / AI flow.
 
 No approval/rejection/editing/auto-posting happens here — this module only
 turns data into one or more Telegram messages (optionally with an inline
-keyboard) and sends them. `TELEGRAM_SEND_ENABLED` gates automatic outbound
-alerts (`send_record`) but never a direct reply to something an operator
-just clicked or typed (`send_text`/`send_plain_text`).
+keyboard) and sends them. The global `TELEGRAM_SEND_ENABLED` master switch
+gates personal automatic delivery (a genuinely new SafeCity message fanned
+out to each active subscription) but never a personal interactive reply to
+something an operator just clicked or typed (`send_plain_text` with
+`enforce_send_enabled=False`). The legacy `TELEGRAM_CHAT_ID` is no longer the
+delivery target — see docs/independent_operator_model.md.
 """
 
 from __future__ import annotations
@@ -185,18 +188,20 @@ class TelegramSender:
         escaping. `reply_markup`, if given, is attached only to the last chunk.
 
         Two distinct delivery concepts share this one method (see
-        docs/service_v1.md "broadcast vs interactive delivery"):
+        docs/independent_operator_model.md "personal delivery vs interactive
+        reply"):
 
-        - automatic broadcast (a genuinely new SafeCity message): caller
-          passes the configured `chat_id` explicitly and leaves
-          `enforce_send_enabled=True` (the default) so TELEGRAM_SEND_ENABLED
-          still gates it.
-        - interactive reply (/latest, ordinary text, any callback): caller
-          MUST pass the inbound `chat_id` explicitly (never the default) and
-          `enforce_send_enabled=False`, since a direct reply to something an
-          operator just clicked or typed must never be silently dropped by
-          TELEGRAM_SEND_ENABLED and must never fall back to the configured
-          broadcast chat.
+        - personal automatic delivery (a genuinely new SafeCity message):
+          `app.commands.poll_once` fans out to each active subscription,
+          passing that subscription's `chat_id` explicitly and leaving
+          `enforce_send_enabled=True` (the default) so the global
+          TELEGRAM_SEND_ENABLED master switch still gates it. There is no
+          single primary recipient and no legacy `TELEGRAM_CHAT_ID` fallback.
+        - personal interactive reply (/latest, ordinary text, any callback):
+          caller MUST pass the inbound `chat_id` explicitly (never a default)
+          and `enforce_send_enabled=False`, since a direct reply to something
+          an operator just clicked or typed must never be silently dropped by
+          TELEGRAM_SEND_ENABLED and must never route to another chat.
         """
         return self._send(
             text,
@@ -227,10 +232,17 @@ class TelegramSender:
             raise TelegramPermanentError("interactive send requires explicit chat_id")
         if not self.settings.telegram_bot_token:
             raise TelegramPermanentError("TELEGRAM_BOT_TOKEN not configured")
-        if enforce_send_enabled and not self.settings.telegram_configured:
-            raise TelegramPermanentError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not configured")
 
+        # v0.4.0: every send has an explicit destination — personal automatic
+        # delivery passes the subscription chat_id, interactive replies pass
+        # the inbound chat_id. The legacy TELEGRAM_CHAT_ID is only a last-ditch
+        # resolution for callers that still omit chat_id; a send with no
+        # resolvable destination fails closed rather than guessing a recipient.
         target_chat_id = chat_id if chat_id is not None else self.settings.telegram_chat_id
+        if target_chat_id is None or str(target_chat_id).strip() == "":
+            raise TelegramPermanentError(
+                "send requires a chat_id (no legacy TELEGRAM_CHAT_ID fallback)"
+            )
         send_started = time.monotonic()
         chunks = split_message(text)
         message_ids: list[str] = []
@@ -761,4 +773,29 @@ def build_unavailable_request_message() -> str:
     preview it targets — never resurrects or reveals the preview's content
     to the mismatched caller."""
     lines = ["[사용할 수 없는 요청]", "", "이 초안이 생성된 Telegram 대화에서 다시 시도해 주세요."]
+    return "\n".join(lines)
+
+
+def build_private_chat_only_message() -> str:
+    """Rejection shown when an operational command/button is used in a group,
+    supergroup, or channel. Operations are strictly private-chat only (v0.4.0)
+    — the action is never processed or rerouted."""
+    lines = [
+        "[개인 채팅에서 사용해 주세요]",
+        "",
+        "운영 명령과 버튼은 봇과의 1:1 개인 채팅에서만 동작합니다.",
+        "그룹/채널에서는 처리되지 않습니다.",
+    ]
+    return "\n".join(lines)
+
+
+def build_ai_unavailable_message() -> str:
+    """Shown when an AI request cannot be accepted right now (e.g. the AI
+    worker pool rejected the task). The operator may retry — nothing was
+    consumed."""
+    lines = [
+        "[AI 요청 처리 불가]",
+        "",
+        "지금은 AI 생성 요청을 받을 수 없습니다. 잠시 후 다시 시도해 주세요.",
+    ]
     return "\n".join(lines)

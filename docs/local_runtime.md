@@ -5,6 +5,13 @@ processes (poller + Telegram bot) that read and write the same SQLite
 database. There is no VPS, no Cloudflare, no production scheduler yet — see
 "Limitations before server deployment" below.
 
+> **v0.4.0 — independent operators.** Automatic delivery is now personal:
+> the poller fans each new record out to every active personal subscription
+> (`telegram_deliveries`), not a single broadcast chat. `/pause` and `/resume`
+> are personal `/mute`/`/unmute` aliases that silence only the calling
+> operator — they no longer pause the shared poller. See
+> `docs/independent_operator_model.md`.
+
 ## Components
 
 ### Poller (`app/poller.py`, `python -m app.commands.run_poller`)
@@ -34,9 +41,11 @@ One long-polling process, one `getUpdates` offset sequence, handling
 
 - ordinary messages: authorizes every command against
   `TELEGRAM_ALLOWED_USER_IDS` (by Telegram user ID, never by chat ID
-  alone), and replies to `/latest`, `/history`, ordinary text (same as `/latest`),
-  `/status`, `/pause`, `/resume`, `/help`, and an optional dev-only
-  `/shutdown`
+  alone), enforces private-chat-only operation, auto-registers/touches the
+  operator's personal subscription, and replies to `/latest`, `/history`,
+  ordinary text (same as `/latest`), `/status`, `/subscribe`, `/unsubscribe`,
+  `/mute`, `/unmute` (`/pause`/`/resume` aliases), `/help`, and an optional
+  dev-only `/shutdown`
 - `callback_query` updates: history selection plus the Service v1 template
   selection/preview/confirm/cancel/AI flow, delegated to
   `app.template_flow.dispatch_callback` (see `docs/telegram_template_flow.md`)
@@ -74,18 +83,21 @@ Each component:
 This is a clean, complete stop of the local processes — not the same thing
 as pausing (see next section).
 
-## `/pause` vs. stopping the bot
+## Personal mute (`/pause`) vs. stopping the bot vs. shared polling
 
-**`/pause` is the normal way to stop automatic collection and notifications
-remotely.** Shutting down the Telegram bot process is not a substitute:
+Since v0.4.0 `/pause` (alias of `/mute`) silences only the **calling
+operator's** automatic delivery — it sets that operator's subscription
+`muted` and does **not** touch the shared poller or any other operator. Use
+`/resume` (alias of `/unmute`) to start receiving again.
 
-- if the bot process is stopped, it can no longer receive a remote
-  `/resume` — you would need shell/SSH access to restart it
-- `/pause` only stops the *poller's* automatic SafeCity requests and
-  outbound alert notifications; `/status`, `/latest`, and `/resume` all
-  keep working immediately, from anywhere, over Telegram
-- the paused state is persisted in SQLite (`system_state.polling_enabled`)
-  and survives a poller restart
+- Muting one operator never stops the shared SafeCity collection; other
+  operators keep receiving alerts.
+- `/status`, `/latest`, `/history`, `/resume` keep working while muted.
+- Each operator's status is persisted in SQLite (`telegram_subscriptions`)
+  and survives a restart.
+- Shared polling can still be paused for local admin/tests via the
+  `pause_polling`/`resume_polling` DB methods (`system_state.polling_enabled`),
+  but Telegram commands no longer drive that state.
 
 An optional `/shutdown` exists only for local development convenience (see
 below) — it is not the intended operational control.
@@ -97,18 +109,23 @@ below) — it is not the intended operational control.
 | `/latest` | yes | Reply with the most recently collected record (full text) |
 | `/history` | yes | Up to 10 recent records as selectable buttons |
 | *(any other text)* | yes | Same as `/latest` |
-| `/status` | yes | Compact system status (see below) |
-| `/pause` | yes | Stop automatic polling + notifications; idempotent |
-| `/resume` | yes | Resume automatic polling + notifications; idempotent |
+| `/status` | yes | Personal alert status + shared collection status (see below) |
+| `/subscribe` | yes | Start/re-activate personal automatic delivery to this chat |
+| `/unsubscribe` | yes | Stop personal automatic delivery entirely |
+| `/mute` (`/pause`) | yes | Personally silence automatic delivery; idempotent |
+| `/unmute` (`/resume`) | yes | Resume personal automatic delivery; idempotent |
 | `/help` | yes | List commands |
 | `/shutdown` | yes, and only if enabled | Dev-only: stop this bot process |
 | *(anything, unauthorized user)* | — | Generic denial; no data revealed |
+| *(any command/button in a group)* | — | Rejected: private-chat only |
 
 Every one of these is an **interactive reply**: it always returns to the
-chat the request came from (`message.chat.id`), never to the configured
-broadcast `TELEGRAM_CHAT_ID` — see `docs/service_v1.md` "Broadcast vs.
-interactive delivery" for the full distinction and how to diagnose a
-misrouted reply.
+chat the request came from (`message.chat.id`), never to the legacy
+`TELEGRAM_CHAT_ID`. All operational commands and buttons are private-chat
+only — a group/supergroup/channel action is acknowledged and rejected in
+place, never processed. See `docs/independent_operator_model.md` and
+`docs/service_v1.md` "Broadcast vs. interactive delivery" for how to diagnose
+a misrouted reply.
 
 `/status` never includes the bot token, chat ID, `.env` path, absolute
 database path, or exception tracebacks — see `docs/telegram_setup.md` for

@@ -72,23 +72,35 @@ DEFAULT_CHAT_ID = 100
 
 
 def _tpl_callback(
-    message_id, template_id, *, user_id=ALLOWED_USER_ID, cbq_id="cbq1", chat_id=DEFAULT_CHAT_ID
+    message_id,
+    template_id,
+    *,
+    user_id=ALLOWED_USER_ID,
+    cbq_id="cbq1",
+    chat_id=DEFAULT_CHAT_ID,
+    chat_type="private",
 ) -> dict:
     return {
         "id": cbq_id,
         "from": {"id": user_id},
-        "message": {"chat": {"id": chat_id}},
+        "message": {"chat": {"id": chat_id, "type": chat_type}},
         "data": make_callback_data(message_id, template_id),
     }
 
 
 def _preview_callback(
-    preview_id, action, *, user_id=ALLOWED_USER_ID, cbq_id="cbq-p1", chat_id=DEFAULT_CHAT_ID
+    preview_id,
+    action,
+    *,
+    user_id=ALLOWED_USER_ID,
+    cbq_id="cbq-p1",
+    chat_id=DEFAULT_CHAT_ID,
+    chat_type="private",
 ) -> dict:
     return {
         "id": cbq_id,
         "from": {"id": user_id},
-        "message": {"chat": {"id": chat_id}},
+        "message": {"chat": {"id": chat_id, "type": chat_type}},
         "data": make_preview_callback_data(preview_id, action),
     }
 
@@ -791,3 +803,112 @@ def test_ai_preview_confirm_records_ai_generation_method(
     decision = db._conn.execute("SELECT * FROM template_decisions").fetchone()
     assert decision["generation_method"] == "ai"
     assert json.loads(decision["final_slots_json"])["하천지점"]["value"] == "예천천"
+
+
+# --- non-blocking AI (bounded worker pool) -----------------------------------
+
+
+class _ThreadFakeSender:
+    """Offline TelegramSender stand-in built by the AI worker thread
+    (`TelegramSender(settings)` positional + context manager)."""
+
+    instances: list = []
+
+    def __init__(self, settings=None, **_kwargs):
+        self.settings = settings
+        self.sent_chat_ids: list = []
+        _ThreadFakeSender.instances.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def close(self):
+        pass
+
+    def answer_callback_query(self, callback_query_id, *, text="", show_alert=False):
+        pass
+
+    def send_plain_text(self, text, *, chat_id=None, reply_markup=None, **_kwargs):
+        self.sent_chat_ids.append(chat_id)
+        return TelegramSendOutcome(status=TelegramStatus.TELEGRAM_SENT, message_ids=["1"])
+
+
+def test_blocked_ai_task_does_not_block_a_non_ai_callback(
+    db, tmp_path, make_record, make_settings, monkeypatch
+):
+    """A slow/blocked AI generation runs on the bounded worker pool, so a
+    different operator's (or the same operator's) non-AI callback still
+    completes synchronously while the AI task is stuck (v0.4.0)."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    # The worker opens its own Database(settings.database_path); point it at
+    # this test's db file and keep its sender offline.
+    settings = make_settings(
+        telegram_allowed_user_ids=(ALLOWED_USER_ID,),
+        ai_enabled=True,
+        openai_api_key="sk-test",
+        database_path=tmp_path / "flow.db",
+        telegram_ai_workers=1,
+    )
+    _ThreadFakeSender.instances = []
+    monkeypatch.setattr("app.template_flow.TelegramSender", _ThreadFakeSender)
+
+    ai_message_id = db.insert(
+        make_record(
+            source_id="AIBLOCK",
+            body="오늘 15시 부로 관내에 발효 중이던 호우주의보가 해제되었습니다. [예천군]",
+            sender="예천군",
+        )
+    )
+    sender = FakeSender()
+    dispatch_callback(db, settings, sender, _tpl_callback(ai_message_id, "FL-01", cbq_id="sel-ai"))
+    ai_preview_id = db._conn.execute(
+        "SELECT preview_id FROM template_previews ORDER BY preview_id DESC LIMIT 1"
+    ).fetchone()["preview_id"]
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocking_generate(**_kwargs):
+        started.set()
+        assert release.wait(timeout=10)
+        return AIGenerationResult(status="succeeded", slots={}, raw_response_json="{}")
+
+    monkeypatch.setattr("app.template_flow.generate_slots", _blocking_generate)
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ai-test")
+    try:
+        dispatch_callback(
+            db,
+            settings,
+            FakeSender(),
+            _preview_callback(ai_preview_id, "ai", cbq_id="ai-blocked"),
+            ai_executor=executor,
+        )
+        assert started.wait(timeout=5), "AI worker never entered generation"
+
+        # While the single AI worker is blocked, a non-AI callback must still
+        # be handled inline on the calling thread.
+        other_message_id = db.insert(
+            make_record(source_id="OTHER", body="폭염주의보 발효 [테스트구]")
+        )
+        non_ai_sender = FakeSender()
+        dispatch_callback(
+            db,
+            settings,
+            non_ai_sender,
+            _tpl_callback(other_message_id, "HW-05", cbq_id="non-ai-while-blocked"),
+            ai_executor=executor,
+        )
+        assert non_ai_sender.sent_texts, "non-AI callback was blocked by the stuck AI task"
+    finally:
+        release.set()
+        executor.shutdown(wait=True)
+
+    # After release, the AI worker delivered its result only to the caller's
+    # chat via its own (offline) sender.
+    assert any(DEFAULT_CHAT_ID in inst.sent_chat_ids for inst in _ThreadFakeSender.instances)

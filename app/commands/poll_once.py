@@ -10,11 +10,18 @@ what a real run would do.
 
 Without --dry-run, newly-detected records are always stored. Telegram
 sending only happens with --send, and only for genuinely new records
-(plus any previously collected-but-unsent records, to support retry)
-unless the database was empty at the start of this run (i.e. this run is
-itself acting as the baseline) — in that baseline case nothing is sent
-unless --notify-existing is also given, per the "don't notify on first
-run" requirement.
+(plus any previously collected-but-unsent per-recipient deliveries, to
+support retry) unless the database was empty at the start of this run (i.e.
+this run is itself acting as the baseline) — in that baseline case nothing
+is sent unless --notify-existing is also given, per the "don't notify on
+first run" requirement.
+
+Automatic delivery is personal (v0.4.0): each genuinely new SafeCity record
+fans out independently to every active personal subscription
+(`telegram_subscriptions`), one `telegram_deliveries` row per recipient. One
+recipient's failure never blocks another; retries target only that
+recipient's failed/pending delivery. There is no single primary recipient
+and no `TELEGRAM_CHAT_ID` fallback — see docs/independent_operator_model.md.
 
 This command runs one cycle and exits; app/poller.py calls `run_poll_cycle`
 directly in a recurring loop for local continuous operation.
@@ -29,7 +36,7 @@ import sys
 from app.collector import CollectorError, EmptyWidgetError, fetch_records
 from app.commands._shared import record_preview
 from app.config import Settings, load_settings
-from app.database import open_database
+from app.database import Database, open_database
 from app.logging_config import configure_logging
 from app.models import DisasterMessageRecord, TelegramStatus
 from app.telegram_sender import TelegramSender
@@ -94,6 +101,145 @@ def main(argv: list[str] | None = None) -> int:
     return run_poll_cycle(settings, send=args.send, notify_existing=args.notify_existing)
 
 
+def _send_one_delivery(
+    sender: TelegramSender,
+    db: Database,
+    settings: Settings,
+    record: DisasterMessageRecord,
+    *,
+    chat_id: str,
+    delivery_id: int,
+    persist_suggestion: bool,
+) -> str:
+    """Send one personal automatic delivery and record its per-recipient
+    outcome. Returns 'sent' | 'failed' | 'pending'. Never raises: isolating
+    one recipient's failure so it cannot block delivery to the others."""
+    try:
+        outcome = send_initial_alert(
+            sender,
+            db,
+            settings,
+            record,
+            target_chat_id=chat_id,
+            persist_suggestion=persist_suggestion,
+            enforce_send_enabled=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - one recipient must never break others
+        db.mark_delivery_failed(delivery_id, error=str(exc))
+        logger.error("delivery %s failed for %s: %s", delivery_id, record.source_id, exc)
+        return "failed"
+
+    if outcome.status == TelegramStatus.TELEGRAM_SENT:
+        db.mark_delivery_sent(delivery_id, telegram_message_id=outcome.combined_message_id)
+        return "sent"
+    if outcome.status == TelegramStatus.TELEGRAM_FAILED:
+        db.mark_delivery_failed(delivery_id, error=outcome.error)
+        logger.error("delivery %s failed for %s: %s", delivery_id, record.source_id, outcome.error)
+        return "failed"
+    # PENDING: e.g. the global TELEGRAM_SEND_ENABLED master switch is off.
+    # Leave the delivery pending so it fires once the switch is enabled.
+    return "pending"
+
+
+def _fan_out_and_retry(
+    db: Database,
+    settings: Settings,
+    new_records: list[DisasterMessageRecord],
+    *,
+    is_baseline_run: bool,
+) -> tuple[int, int]:
+    """Fan out each genuinely new record to every active personal subscription
+    and retry any previously failed/pending per-recipient deliveries. Each
+    recipient is an independent delivery; one failure never blocks another.
+    Returns (sent_count, failed_count) summed across all recipients."""
+    subscriptions = db.list_active_subscriptions(settings.telegram_allowed_user_ids)
+
+    # Build the retry set from telegram_deliveries (never messages.telegram_status)
+    # BEFORE creating this cycle's new delivery rows, so a brand-new record's
+    # own deliveries are not retried in the same pass they were just created.
+    retry_rows = [] if is_baseline_run else db.list_retryable_deliveries()
+
+    if not subscriptions and new_records:
+        for record in new_records:
+            logger.warning(
+                "no active subscriptions; stored %s without delivery "
+                "(no TELEGRAM_CHAT_ID fallback)",
+                record.source_id,
+            )
+            db.update_message_aggregate_status(record.internal_id)
+
+    # Pre-create one pending delivery row per (new record, subscription) so the
+    # retry set and the new set never overlap and each recipient is tracked
+    # independently. persist_suggestion is emitted once per message only.
+    planned: list[tuple[DisasterMessageRecord, str, int, bool]] = []
+    for record in new_records:
+        first_for_message = True
+        for sub in subscriptions:
+            delivery_id = db.create_delivery_if_missing(
+                message_id=record.internal_id, subscription=sub
+            )
+            if delivery_id is None:
+                continue
+            planned.append((record, sub.chat_id, delivery_id, first_for_message))
+            first_for_message = False
+
+    print("records that would be sent to Telegram:")
+    if not (planned or retry_rows):
+        print("  (none)")
+        print("nothing to send.")
+        return (0, 0)
+    for record, _chat_id, _delivery_id, _first in planned:
+        print(f"  -> {record_preview(record)}")
+    for row in retry_rows:
+        print(f"  retry -> delivery {row['delivery_id']} (message {row['message_id']})")
+
+    sent_count = 0
+    failed_count = 0
+    touched_messages: set[int] = set()
+    with TelegramSender(settings) as sender:
+        # Retry previous cycles' failed/pending deliveries first.
+        for row in retry_rows:
+            record = db.get_by_internal_id(row["message_id"])
+            if record is None:
+                continue
+            result = _send_one_delivery(
+                sender,
+                db,
+                settings,
+                record,
+                chat_id=str(row["sub_chat_id"]),
+                delivery_id=row["delivery_id"],
+                persist_suggestion=False,
+            )
+            touched_messages.add(row["message_id"])
+            if result == "sent":
+                sent_count += 1
+            elif result == "failed":
+                failed_count += 1
+
+        # Fan out this cycle's new records.
+        for record, chat_id, delivery_id, first_for_message in planned:
+            result = _send_one_delivery(
+                sender,
+                db,
+                settings,
+                record,
+                chat_id=str(chat_id),
+                delivery_id=delivery_id,
+                persist_suggestion=first_for_message,
+            )
+            touched_messages.add(record.internal_id)
+            if result == "sent":
+                sent_count += 1
+            elif result == "failed":
+                failed_count += 1
+
+    for message_id in touched_messages:
+        db.update_message_aggregate_status(message_id)
+
+    return (sent_count, failed_count)
+
+
 def run_poll_cycle(settings: Settings, *, send: bool, notify_existing: bool) -> int:
     """Execute one real (non-dry-run) poll cycle. Used by both the CLI and app/poller.py."""
     with open_database(settings.database_path) as db:
@@ -132,43 +278,16 @@ def run_poll_cycle(settings: Settings, *, send: bool, notify_existing: bool) -> 
         failed_count = 0
 
         if send:
-            should_send_new = (not is_baseline_run) or notify_existing
-            send_targets: list[DisasterMessageRecord] = list(new_records) if should_send_new else []
-            retry_records = db.pending_retry_records() if not is_baseline_run else []
-
-            print("records that would be sent to Telegram:")
-            if not (send_targets or retry_records):
-                print("  (none)")
-            else:
-                for record in [*send_targets, *retry_records]:
-                    print(f"  {record_preview(record)}")
-
-            if send_targets or retry_records:
-                with TelegramSender(settings) as sender:
-                    for record in [*send_targets, *retry_records]:
-                        outcome = send_initial_alert(
-                            sender,
-                            db,
-                            settings,
-                            record,
-                            target_chat_id=settings.telegram_chat_id,
-                            persist_suggestion=True,
-                            enforce_send_enabled=True,
-                        )
-                        db.update_telegram_result(
-                            record.internal_id,
-                            status=outcome.status,
-                            message_id=outcome.combined_message_id,
-                        )
-                        if outcome.status == TelegramStatus.TELEGRAM_SENT:
-                            sent_count += 1
-                        elif outcome.status == TelegramStatus.TELEGRAM_FAILED:
-                            failed_count += 1
-                            logger.error(
-                                "Telegram send failed for %s: %s", record.source_id, outcome.error
-                            )
-            else:
-                print("nothing to send.")
+            # One-time bootstrap so the poller can deliver even if the bot
+            # process has not seeded subscriptions yet (no-op once seeded).
+            db.seed_subscriptions_if_empty(
+                allowed_user_ids=settings.telegram_allowed_user_ids,
+                legacy_chat_id=settings.telegram_chat_id or None,
+            )
+            deliver_new = new_records if (not is_baseline_run or notify_existing) else []
+            sent_count, failed_count = _fan_out_and_retry(
+                db, settings, deliver_new, is_baseline_run=is_baseline_run
+            )
         elif is_baseline_run and not notify_existing:
             print("this run established the baseline; nothing sent to Telegram by default.")
 

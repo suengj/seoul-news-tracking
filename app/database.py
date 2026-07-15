@@ -1504,13 +1504,27 @@ class Database:
         # insert's rowid, so it cannot distinguish a real insert from a dedup.
         return cur.lastrowid if cur.rowcount > 0 else None
 
-    def list_retryable_deliveries(self) -> list[sqlite3.Row]:
-        """pending/failed deliveries whose subscription is still active+private
-        and whose source message still exists (non-baseline), joined with the
-        current subscription chat. Retry logic uses this — never
-        messages.telegram_status."""
+    def list_retryable_deliveries(
+        self, allowed_user_ids: tuple[int, ...] | list[int]
+    ) -> list[sqlite3.Row]:
+        """pending/failed deliveries whose subscription is still active+private,
+        whose source message still exists (non-baseline), AND whose owning user
+        is currently present in TELEGRAM_ALLOWED_USER_IDS. Retry logic uses this
+        — never messages.telegram_status.
+
+        A user removed from the allowed list is never retried again: the
+        historical delivery row is kept for audit, just excluded from the retry
+        set (mirrors list_active_subscriptions' allowed-user filter so a new
+        alert and a retry authorize identically). An empty allowed list safely
+        yields no rows — the IN (...) clause is only built from a
+        placeholder-per-id, never from an empty list (which would be invalid
+        SQL), and there is no TELEGRAM_CHAT_ID fallback."""
+        allowed = list(dict.fromkeys(allowed_user_ids))
+        if not allowed:
+            return []
+        placeholders = ",".join("?" for _ in allowed)
         return self._conn.execute(
-            """
+            f"""
             SELECT d.*, s.chat_id AS sub_chat_id, s.user_id AS sub_user_id,
                    s.status AS sub_status, s.chat_type AS sub_chat_type
             FROM telegram_deliveries d
@@ -1520,8 +1534,10 @@ class Database:
               AND s.status = 'active'
               AND s.chat_type = 'private'
               AND m.is_baseline = 0
+              AND s.user_id IN ({placeholders})
             ORDER BY d.delivery_id ASC
-            """
+            """,
+            tuple(allowed),
         ).fetchall()
 
     def mark_delivery_sent(self, delivery_id: int, *, telegram_message_id: str | None) -> None:

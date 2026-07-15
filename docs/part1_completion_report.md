@@ -418,3 +418,37 @@ migration/bootstrap only.
 
 See `docs/independent_operator_model.md` for the full model. A live
 two-operator private-chat check is required before tagging `v0.4.0`.
+
+## 0.4.1: poller-control and delivery-retry hardening
+
+A compact production hotfix for two narrow v0.4.0 defects, plus an explicit
+local command for the shared collector. The v0.4.0 independent-operator
+architecture is unchanged (no schema, config, or Telegram-command-contract
+change).
+
+- **Retry authorization filtering**: automatic *new* deliveries already used
+  `list_active_subscriptions(allowed_user_ids)`, but *retries* used
+  `list_retryable_deliveries()` with no allow-list check, so a failed/pending
+  delivery could be retried after the user was removed from
+  `TELEGRAM_ALLOWED_USER_IDS`. `list_retryable_deliveries` now takes
+  `allowed_user_ids` and filters with a parameterized `IN (...)` clause (empty
+  list ⇒ no rows, no invalid SQL, no `TELEGRAM_CHAT_ID` fallback); the poller
+  passes `settings.telegram_allowed_user_ids`. Historical delivery rows are
+  kept for audit, just not resent.
+- **`/status` privacy**: the shared-collector section no longer prints the
+  `paused_by` operator id (the `중지 요청자` line was removed). The pause
+  timestamp may still show, without any actor identity. `system_state`'s
+  `paused_by`/`resumed_by` columns and internal logs are unchanged (audit
+  retained).
+- **Local shared-collector control** (`app/commands/poller_control.py`):
+  `status` (read-only, identifier-free), `resume`, `pause` — idempotent,
+  recording control events under the non-user administrative actor id `0`. It
+  is the only explicit shared-poller control, is not a Telegram command, and is
+  not in `/help`. It exists to re-enable a collector that a legacy pre-v0.4.0
+  Telegram `/pause` left disabled after migrating an older DB.
+- The offline validator gained `Retry authorization filtering`, `Status
+  privacy`, `Personal/global pause separation`, and `Local poller control`
+  checks (32 checks total, all PASS). New unit tests cover the poller-control
+  command, the ten retry-authorization cases, and `/status` privacy.
+
+A live two-operator private-chat check is required before tagging `v0.4.1`.

@@ -20,14 +20,26 @@ migration is additive plus an idempotent, decision-preserving rebuild of
 than removed; and existing commands keep working (`/pause`→`/mute`,
 `/resume`→`/unmute` aliases). See `docs/independent_operator_model.md`.
 
+`0.4.1` is a **PATCH** hotfix: no schema, config, or Telegram command contract
+change. It (1) filters the retry set by the current `TELEGRAM_ALLOWED_USER_IDS`
+(`list_retryable_deliveries` gains an `allowed_user_ids` argument — a Database
+method signature change only, internal to the app), (2) removes the pauser's
+identity (`paused_by`) from the user-facing `/status`, and (3) adds a
+local-only `poller_control` command to inspect/resume/pause the shared
+collector. The v0.4.0 independent-operator architecture is unchanged.
+
 ## Release steps
 
-Same as before. For 0.4.0 specifically: run
+Same as before. For 0.4.0 / 0.4.1 specifically: run
 `python -m app.commands.validate_telegram_behavior` (the extended
-independent-operator PASS/FAIL block), validate the migration on a **copy** of
-the production DB (never the real file), restart on merged main, perform the
-two-operator private-chat check in `docs/telegram_routing_validation.md`, then
-tag `v0.4.0` only after live validation succeeds.
+independent-operator PASS/FAIL block, now including `Retry authorization
+filtering`, `Status privacy`, `Personal/global pause separation`, and `Local
+poller control`), validate on a **copy** of the production DB (never the real
+file), check the shared collector with `python -m app.commands.poller_control
+status` (resume only if a legacy pause left it disabled), restart on merged
+main, perform the two-operator private-chat check in
+`docs/telegram_routing_validation.md`, then tag (`v0.4.0` / `v0.4.1`) only
+after live validation succeeds.
 
 1. Update/add tests for the change.
 2. Update `CHANGELOG.md` (`[Unreleased]` -> a new dated version section).

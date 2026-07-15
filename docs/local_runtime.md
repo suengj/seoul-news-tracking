@@ -95,9 +95,32 @@ operator's** automatic delivery — it sets that operator's subscription
 - `/status`, `/latest`, `/history`, `/resume` keep working while muted.
 - Each operator's status is persisted in SQLite (`telegram_subscriptions`)
   and survives a restart.
-- Shared polling can still be paused for local admin/tests via the
-  `pause_polling`/`resume_polling` DB methods (`system_state.polling_enabled`),
-  but Telegram commands no longer drive that state.
+- The shared collector (`system_state.polling_enabled`) is controlled only by
+  the local `poller_control` command below — Telegram commands no longer drive
+  that state.
+
+### Local shared-collector control (`poller_control`, v0.4.1)
+
+`poller_control` is the only explicit control over the shared SafeCity
+collector. It is a **local host command**, not a Telegram command, and is not
+exposed via `/help`. `pause` here stops collection for **everyone** — it is
+not a personal Telegram mute.
+
+```bash
+python -m app.commands.poller_control status   # read-only: polling_enabled,
+                                                # last_successful_poll_at,
+                                                # last_new_message_at,
+                                                # last_poll_error, health
+python -m app.commands.poller_control resume    # idempotently enable
+python -m app.commands.poller_control pause      # idempotently pause (all)
+```
+
+`resume`/`pause` are idempotent and record a control event under the non-user
+administrative actor id `0`. `status` prints no tokens and no Telegram
+identifiers. This is the supported way to re-enable a collector that a
+pre-v0.4.0 Telegram `/pause` left disabled (`polling_enabled = 0`) after
+migrating an older database — a state where operators can be correctly
+subscribed while collection is silently stopped.
 
 An optional `/shutdown` exists only for local development convenience (see
 below) — it is not the intended operational control.
@@ -128,9 +151,11 @@ place, never processed. See `docs/independent_operator_model.md` and
 a misrouted reply.
 
 `/status` never includes the bot token, chat ID, `.env` path, absolute
-database path, or exception tracebacks — see `docs/telegram_setup.md` for
-the exact format. It does include the running service version (see
-`docs/versioning.md`).
+database path, or exception tracebacks — and (v0.4.1) never the identity of
+whoever paused the shared collector (`paused_by`/`resumed_by`). The shared
+section may show the pause timestamp (`중지 시각`) without any actor id. See
+`docs/telegram_setup.md` for the exact format. It does include the running
+service version (see `docs/versioning.md`).
 
 ### `/shutdown` (development only)
 

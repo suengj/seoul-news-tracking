@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-15
+
+Compact production hotfix for two narrow v0.4.0 defects, plus an explicit
+local command to inspect and control the shared SafeCity collector after
+migrating from an older version. The v0.4.0 independent-operator architecture
+is unchanged: Telegram `/pause` and `/resume` remain personal mute/unmute
+aliases, and the new command is the only explicit shared-collector control.
+
+### Fixed
+- Failed or pending deliveries are no longer retried for users removed from
+  `TELEGRAM_ALLOWED_USER_IDS`. `list_retryable_deliveries` now takes the
+  current allowed-user IDs and filters the retry set with a parameterized
+  `IN (...)` clause (empty list is safe — no rows, no invalid SQL, no
+  `TELEGRAM_CHAT_ID` fallback), so a retry authorizes identically to a new
+  delivery. Historical delivery rows are kept for audit, just not resent.
+- `/status` no longer exposes the operator identity that paused the shared
+  collector: the `중지 요청자` (`paused_by`) line was removed from the
+  user-facing reply. The pause timestamp may still appear, without any actor
+  identity. The underlying `system_state.paused_by` / `resumed_by` fields and
+  internal logs are unchanged and still retain administrative attribution.
+
+### Added
+- `app/commands/poller_control.py`: a local-only administrative command to
+  inspect, resume, and pause the shared SafeCity poller after migration from
+  older versions:
+  - `python -m app.commands.poller_control status`
+  - `python -m app.commands.poller_control resume`
+  - `python -m app.commands.poller_control pause`
+  It is idempotent, records control events under the non-user administrative
+  actor id `0`, prints only non-sensitive fields (no tokens or Telegram
+  identifiers), and is deliberately NOT exposed through the Telegram bot or
+  `/help`.
+- Offline validator checks: `Retry authorization filtering`, `Status privacy`,
+  `Personal/global pause separation`, and `Local poller control`.
+
 ## [0.4.0] - 2026-07-15
 
 Independent Telegram operators: every authorized operator is now an equal,

@@ -185,8 +185,11 @@ def build_status_reply(
         lines.append(f"수집 상태: {escape_markdown_v2('일시정지')}")
         if state.paused_at:
             lines.append(f"중지 시각: {escape_markdown_v2(format_timestamp(state.paused_at))}")
-        if state.paused_by is not None:
-            lines.append(f"중지 요청자: {escape_markdown_v2(str(state.paused_by))}")
+        # Intentionally NOT shown: paused_by/resumed_by. The pause timestamp may
+        # appear, but never the actor's Telegram user id — a /status reply must
+        # not leak another operator's identifier (v0.4.1). The attribution is
+        # preserved in the DB (system_state.paused_by) and internal logs for
+        # administrative audit only.
     else:
         stale = False
         if state.last_successful_poll_at is not None:

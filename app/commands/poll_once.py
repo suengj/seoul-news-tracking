@@ -157,7 +157,12 @@ def _fan_out_and_retry(
     # Build the retry set from telegram_deliveries (never messages.telegram_status)
     # BEFORE creating this cycle's new delivery rows, so a brand-new record's
     # own deliveries are not retried in the same pass they were just created.
-    retry_rows = [] if is_baseline_run else db.list_retryable_deliveries()
+    # Pass the current allowed-user IDs so a retry authorizes identically to a
+    # new delivery — a user removed from TELEGRAM_ALLOWED_USER_IDS is never
+    # retried (their historical delivery row is kept for audit only).
+    retry_rows = (
+        [] if is_baseline_run else db.list_retryable_deliveries(settings.telegram_allowed_user_ids)
+    )
 
     if not subscriptions and new_records:
         for record in new_records:

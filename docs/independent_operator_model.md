@@ -60,12 +60,39 @@ private chat), `chat_type`, `status` (`active` / `muted` / `unsubscribed`),
 | `/unsubscribe` | Stop automatic delivery entirely (구독 해제). |
 | `/mute` (`/pause`) | Temporarily silence **your** automatic delivery. Never affects other operators or shared polling. |
 | `/unmute` (`/resume`) | Resume your automatic delivery. |
-| `/status` | Two sections: `[내 알림 상태]` (your own) + `[공통 수집 상태]` (shared). Never shows another operator's ids. |
+| `/status` | Two sections: `[내 알림 상태]` (your own) + `[공통 수집 상태]` (shared). Never shows another operator's ids, and (v0.4.1) never shows who paused the shared collector (`paused_by`/`resumed_by`). |
 
 All operational commands and inline buttons are **private-chat only**. A
 group/supergroup/channel action is acknowledged (the spinner stops) and
 rejected in place with `[개인 채팅에서 사용해 주세요] …` — it is never processed
 and never rerouted to a private chat.
+
+## Shared collector control (local admin only, v0.4.1)
+
+Since v0.4.0, Telegram `/pause` and `/resume` are **personal** mute/unmute
+aliases and never touch the shared collector's `system_state.polling_enabled`.
+The **only** explicit control over the shared SafeCity collector is a
+local-only command run on the host — it is not a Telegram command and is not
+exposed via `/help`:
+
+```bash
+python -m app.commands.poller_control status   # inspect (read-only)
+python -m app.commands.poller_control resume    # enable shared collection
+python -m app.commands.poller_control pause      # pause shared collection (everyone)
+```
+
+- `status` prints only `polling_enabled`, `last_successful_poll_at`,
+  `last_new_message_at`, `last_poll_error`, and a `healthy` / `stale` /
+  `disabled` health label — no tokens and no Telegram identifiers.
+- `resume` / `pause` are idempotent, record a control event under the non-user
+  administrative actor id `0`, and print whether the state changed.
+- This matters after migrating a **pre-v0.4.0** database: a legacy Telegram
+  `/pause` may have left `polling_enabled = 0`, silently stopping collection
+  for everyone while operators remain correctly subscribed. `poller_control
+  resume` is the supported way to re-enable it.
+
+Operators must not use Telegram commands to control another operator's
+service; shared collection is a host-local administrative concern.
 
 ## Per-recipient automatic delivery (`telegram_deliveries`)
 
@@ -78,10 +105,17 @@ delivery row per recipient (`UNIQUE(message_id, subscription_id)`):
    row `sent` / `failed` / left `pending` (global switch off).
 4. One recipient's failure never blocks the others.
 
-Retries are driven by `list_retryable_deliveries()` (pending/failed rows on
-active private subscriptions for non-baseline messages) — **never** by
-`messages.telegram_status`. A `sent` row is never re-sent.
+Retries are driven by `list_retryable_deliveries(allowed_user_ids)`
+(pending/failed rows on active private subscriptions for non-baseline
+messages, **for users still present in `TELEGRAM_ALLOWED_USER_IDS`**) —
+**never** by `messages.telegram_status`. A `sent` row is never re-sent.
 
+- **Retry follows the current allow-list (v0.4.1)**: the poller passes
+  `settings.telegram_allowed_user_ids`, so a retry authorizes identically to a
+  new delivery. A user removed from `TELEGRAM_ALLOWED_USER_IDS` is never
+  retried — their historical delivery row is kept for audit, just not resent.
+  An empty allow-list safely yields no retry rows (parameterized `IN (...)`,
+  never invalid SQL, never a `TELEGRAM_CHAT_ID` fallback).
 - **No fallback**: with zero active subscriptions a new record is stored and a
   WARNING is logged; nothing is sent to `TELEGRAM_CHAT_ID`.
 - **No backfill**: a newly subscribed operator receives only *future*

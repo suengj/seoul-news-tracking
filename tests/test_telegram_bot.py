@@ -371,6 +371,41 @@ def test_status_has_personal_and_shared_sections(make_settings, db):
     assert "300" not in text
 
 
+def test_status_does_not_expose_pause_actor_identifier(make_settings, db):
+    # v0.4.1: the shared collector was paused by some operator; another operator
+    # running /status must never see who paused it (paused_by/resumed_by).
+    pauser_id = 876543210
+    db.pause_polling(actor_user_id=pauser_id)
+    settings = make_settings(telegram_allowed_user_ids=(111, pauser_id))
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+    bot.dispatch(_message_update(1, user_id=111, text="/status", chat_id=200))
+    text = sent[0]["text"]
+    assert str(pauser_id) not in text  # actor id never leaks
+    assert "요청자" not in text  # no "중지 요청자" line
+    assert "paused_by" not in text
+    assert "resumed_by" not in text
+    # Shared collector state still appears, and the pause timestamp may show
+    # (without any actor identity).
+    assert "공통 수집 상태" in text
+    assert "일시정지" in text
+    assert "중지 시각" in text
+    # The DB still retains the attribution for administrative audit.
+    assert db.get_system_state().paused_by == pauser_id
+
+
+def test_status_still_shows_personal_and_shared_when_paused(make_settings, db):
+    db.pause_polling(actor_user_id=222)
+    settings = make_settings(telegram_allowed_user_ids=(111, 222))
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+    bot.dispatch(_message_update(1, user_id=111, text="/status", chat_id=200))
+    text = sent[0]["text"]
+    assert "내 알림 상태" in text  # personal section present
+    assert "공통 수집 상태" in text  # shared section present
+    assert "222" not in text  # pauser id not leaked
+
+
 # -- /help and unknown/dev commands -------------------------------------------
 
 
@@ -380,6 +415,17 @@ def test_help_command(make_settings, db):
     bot = make_bot(settings, db, _record_handler(sent))
     bot.dispatch(_message_update(1, user_id=111, text="/help"))
     assert "latest" in sent[0]["text"]
+
+
+def test_help_does_not_expose_local_admin_poller_control(make_settings, db):
+    # v0.4.1: the local shared-poller admin command must never be surfaced
+    # through the Telegram bot's /help.
+    settings = make_settings(telegram_allowed_user_ids=(111,))
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+    bot.dispatch(_message_update(1, user_id=111, text="/help"))
+    text = sent[0]["text"]
+    assert "poller_control" not in text
 
 
 def test_shutdown_disabled_by_default(make_settings, db):

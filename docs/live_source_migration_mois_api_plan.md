@@ -1,161 +1,244 @@
-# 실시간 재난문자 Source 전환 계획 — 행정안전부 SafetyData API
+# 실시간 재난문자 Source 전환 계획 — 행정안전부 API + 국민안전24 Fallback
 
 - 작성일: 2026-07-16 (KST)
 - 현재 서비스 기준: v0.4.1
+- 목표 버전: v0.5.0
 - 대상 저장소: `suengj/seoul-news-tracking`
-- 신규 공식 데이터 안내: `https://www.safetydata.go.kr/disaster-data/view?dataSn=228`
-- 신규 API base: `https://www.safetydata.go.kr/V2/api/DSSP-IF-00247`
-- 상태: **구현 전 기획 확정 단계**
+- Primary 안내: `https://www.safetydata.go.kr/disaster-data/view?dataSn=228`
+- Primary API: `https://www.safetydata.go.kr/V2/api/DSSP-IF-00247`
+- Fallback: 국민안전24 재난문자 조회 HTML
+- 상태: 구현 전 계약 확인 및 Cutover 설계 완료
 
-## 1. 변경 배경
+## 1. 배경
 
-기존 실시간 수집은 서울안전누리 페이지에서 세션을 생성한 뒤 비공개성 XHR 엔드포인트를 호출하는 방식이다.
+기존 실시간 Collector는 서울안전누리 페이지에서 `JSESSIONID`를 얻은 뒤 비공개성 XHR endpoint를 호출한다.
 
-현재 코드 경로:
+현재 관련 코드:
 
 - `app/collector.py`
-  - `GET https://safecity.seoul.go.kr/news/dist/dust/newsDistDustList.page`
-  - `POST https://safecity.seoul.go.kr/disstr/selectDisstrSms.do`
+  - 서울안전누리 page GET
+  - `/disstr/selectDisstrSms.do` POST
 - `app/parser.py`
-  - 기존 응답의 `sms[]`와 `disstrSmsSn`, `disstrDate`, `lctnNm`, `smsMsg`를 해석
+  - 기존 `sms[]` payload parsing
 - `app/config.py`
-  - `SOURCE_PAGE_URL`, `SOURCE_API_URL` 상수 보유
+  - `SOURCE_PAGE_URL`, `SOURCE_API_URL`
 - `docs/source_discovery.md`
-  - 기존 서울안전누리 XHR 조사 결과
+  - 기존 source 조사 기록
 
-서울안전누리 개편으로 이 계약을 더 이상 신뢰할 수 없으므로, 실시간 원천을 행정안전부 재난안전데이터공유플랫폼의 공식 Open API로 전환한다.
+서울안전누리 개편으로 기존 계약을 더 이상 신뢰할 수 없으므로 공식 행정안전부 SafetyData API로 교체한다.
 
-공식 데이터 페이지는 해당 데이터를 `행정안전부_긴급재난문자`로 설명하며, Open API가 REST 기반 JSON/XML 방식이고 회원가입 및 활용 신청이 필요하다고 안내한다.
+API가 일시적으로 실패할 때에는 국민안전24의 서울 필터 재난문자 조회 HTML을 조건부 fallback으로 사용한다.
 
-## 2. 이번 전환의 핵심 원칙
+## 2. 최종 Source 우선순위
 
-1. **기존 서울안전누리 수집 경로는 런타임에서 완전히 OFF한다.**
-2. **자동 fallback으로 기존 홈페이지를 다시 호출하지 않는다.**
-3. 신규 API 실패 시 잘못된 데이터를 보내지 말고 Poll cycle을 실패 처리한다.
-4. API 응답은 현재의 `DisasterMessageRecord`로 정규화한다.
-5. 정규화 이후의 DB, 중복 제거, Telegram fan-out, 템플릿, AI, 사용자별 독립 처리 구조는 변경하지 않는다.
-6. 서비스 키는 로컬 `.env`에만 저장하며 Git, 로그, DB, `source_url`, 오류 메시지에 노출하지 않는다.
-7. 첫 전환 시 기존 API와 신규 API의 ID 체계가 다르므로 **명시적 cutover baseline**을 수행해 과거 문자가 재발송되지 않게 한다.
-8. 현재의 5,005건 역사 DB와 HTML backfill 기능은 별도 분석 자산이므로 이번 실시간 원천 전환에서 수정하지 않는다.
+```text
+1순위: 행정안전부 SafetyData Open API
+2순위: 국민안전24 서울 필터 HTML
+사용 금지: 기존 서울안전누리 collector
+```
 
-## 3. 범위
+원칙:
 
-### 포함
+1. API가 성공하면 API만 사용한다.
+2. API가 정상적으로 0건을 반환하면 fallback을 실행하지 않는다.
+3. API가 hard failure이면 같은 Poll cycle에서 국민안전24 fallback을 시도한다.
+4. API와 fallback 모두 실패하면 fail-closed한다.
+5. 기존 서울안전누리로는 어떤 경우에도 fallback하지 않는다.
+6. 어느 원천을 사용하더라도 `DisasterMessageRecord` 이후 처리 흐름은 동일하다.
 
-- 실시간 collector를 행정안전부 SafetyData API로 교체
-- 신규 API 계약 검사 명령 추가
-- 서울특별시 및 서울 25개 자치구 수신 대상 필터
-- 신규 응답을 `DisasterMessageRecord`로 변환
-- 페이지네이션/조회 기간/정렬 검증 후 최근 데이터 polling
-- source cutover baseline 및 재발송 방지
-- API 오류/쿼터/인증 오류 관측성
-- `.env.example`, 테스트, 문서, 버전 업데이트
+국민안전24 fallback 상세 설계는 다음 문서를 따른다.
 
-### 제외
+```text
+docs/safekorea_html_fallback_plan.md
+```
 
-- Telegram 독립 사용자 구조 변경
-- 템플릿 YAML 및 Excel 문안 변경
-- AI 모델 또는 Prompt 변경
-- 기존 `data/history_raw.db` 재수집
-- X 자동 게시
-- 기존 서울안전누리 경로를 fallback으로 유지하는 기능
+## 3. Primary API 계약
 
-## 4. 확정된 신규 설정
+### Request
 
-로컬 `.env`에 다음 키를 둔다.
+```text
+GET /V2/api/DSSP-IF-00247
+```
+
+요청 변수:
+
+| 국문 | 영문 | 필수 | 용도 |
+|---|---|---:|---|
+| 서비스키 | `serviceKey` | Y | 로컬 `.env` secret |
+| 페이지당개수 | `numOfRows` | N | page size |
+| 페이지번호 | `pageNo` | N | pagination |
+| 응답타입 | `returnType` | N | `json` |
+| 조회시작일자 | `crtDt` | N | `YYYYMMDD` |
+| 지역명 | `rgnNm` | N | `서울특별시` |
+
+### Response item
+
+| 국문 | 영문 | Normalized mapping |
+|---|---|---|
+| 일련번호 | `SN` | `source_id = MOIS:{SN}` |
+| 생성일시 | `CRT_DT` | `sent_at` |
+| 메시지내용 | `MSG_CN` | `original_body` |
+| 수신지역명 | `RCPTN_RGN_NM` | `sender_or_region` |
+| 긴급단계명 | `EMRG_STEP_NM` | `raw_payload` |
+| 재해구분명 | `DST_SE_NM` | `raw_payload` |
+| 등록일자 | `REG_YMD` | `raw_payload` |
+| 수정일자 | `MDFCN_YMD` | `raw_payload` |
+
+`REG_YMD`, `MDFCN_YMD`는 발송시각으로 사용하지 않는다.
+
+## 4. 서울특별시 대상 판정
+
+최종 판정 기준은 메시지 본문이 아니라 공식 수신지역 field인 `RCPTN_RGN_NM`이다.
+
+포함:
+
+- `서울특별시`
+- `서울특별시 구로구`
+- `서울특별시 강남구`
+- 복수지역 중 하나라도 `서울특별시` 포함
+
+예:
+
+```text
+경기도 광명시, 경기도 시흥시, 서울특별시 구로구
+```
+
+위 항목은 서울 대상이다.
+
+제외:
+
+- `MSG_CN`에만 서울이라는 단어가 등장
+- 발신기관명에만 서울이 등장
+- `RCPTN_RGN_NM`에 서울특별시가 없음
+
+서버 요청에는 `rgnNm=서울특별시`를 우선 사용하되, 실제 API 검사에서 복수지역 서울 항목이 누락되는지 비교한다.
+
+```text
+rgnNm
+= 요청량 절감용 서버 필터
+
+RCPTN_RGN_NM
+= 최종 client-side 판정 기준
+```
+
+## 5. 국민안전24 Fallback URL
+
+서울 필터 URL의 핵심 값:
+
+```text
+sbLawArea1=1100000000
+```
+
+조회 URL 형태:
+
+```text
+https://www.safekorea.go.kr/safekorea-kor/ctim/cmsg/calamitySms.do
+?menuSn=34
+&bbsSn=
+&currentPage=1
+&firstYn=
+&searchType=
+&cOcrcType=
+&dsstrSeId=
+&sbLawArea1=1100000000
+&sbLawArea2=
+&sbLawArea3=
+&keyword=
+&startDate=<KST dynamic date>
+&endDate=<KST today>
+&readYn=Y
+```
+
+지역 필터 없는 URL은 production fallback이 아니라 서울 필터 completeness 검사에만 사용한다.
+
+Fallback은 목록만으로 끝나지 않을 수 있다. 각 항목의 stable ID와 상세 URL을 확인하고, unseen 항목만 상세 HTML을 요청해 다음을 추출한다.
+
+- 본문
+- 발송일시
+- 긴급단계
+- 송출지역
+- 재해구분(존재 시)
+
+HTML selector와 detail contract는 로컬 inspector로 먼저 확정한다.
+
+## 6. 환경변수
+
+로컬 `.env`:
 
 ```env
-# Required for the live MOIS SafetyData collector.
-# Never commit the real value.
 SAFETYDATA_SERVICE_KEY=
+SAFETYDATA_FALLBACK_ENABLED=true
+SAFETYDATA_FALLBACK_MAX_PAGES=10
+SAFETYDATA_FALLBACK_REQUEST_TIMEOUT_SECONDS=15
 ```
 
-`.env.example`에도 동일한 빈 항목과 설명을 추가한다.
+`.env.example`에는 빈 값과 설명만 추가한다.
 
-권장 코드 상수:
+보안 원칙:
 
-```python
-MOIS_API_BASE_URL = "https://www.safetydata.go.kr/V2/api/DSSP-IF-00247"
-MOIS_DATASET_PAGE_URL = "https://www.safetydata.go.kr/disaster-data/view?dataSn=228"
-```
+- Service Key commit 금지
+- query string 전체 log 금지
+- `httpx` params로 전달
+- `source_url`에 key 포함 금지
+- 오류 body 전체 log 금지
+- key 누락은 fallback으로 숨기지 않고 fail-fast
 
-주의:
+## 7. 코드 변경 위치
 
-- 요청 URL 문자열을 직접 조합해 로그로 출력하지 않는다.
-- `serviceKey`는 `httpx`의 `params`로 전달한다.
-- 오류 로그에는 query string을 제거한 base URL만 남긴다.
-- `DisasterMessageRecord.source_url`에는 서비스 키가 포함된 호출 URL이 아니라 `MOIS_DATASET_PAGE_URL` 또는 key가 없는 base URL만 저장한다.
-- 실제 키가 URL-encoded key인지 decoded key인지는 최초 live contract 검사에서 확인하고 문서화한다. 추측으로 이중 인코딩하지 않는다.
+### `app/collector.py`
 
-## 5. 구현 구조
-
-프로젝트를 크게 재구성하지 않는다. 기존 인터페이스를 유지하는 것이 핵심이다.
-
-### 5.1 `app/collector.py`
-
-현재 외부 호출부의 `fetch_records()` 계약을 유지한다.
+`fetch_records()` 외부 계약을 유지한다.
 
 ```python
 fetch_records(...) -> CollectionResult
 ```
 
-내부만 다음으로 교체한다.
+내부 흐름:
 
 ```text
-기존
-GET 서울안전누리 page
-→ JSESSIONID
-→ POST selectDisstrSms.do
-
-신규
-GET /V2/api/DSSP-IF-00247
-→ serviceKey + 문서에서 확인된 조회 파라미터
-→ JSON 응답 검증
-→ 서울 수신 대상 필터
-→ DisasterMessageRecord 목록
+SafetyData API 요청
+→ 성공: API normalized records 반환
+→ 정상 0건: 빈 CollectionResult 반환
+→ hard failure: SafeKorea fallback
+→ fallback 성공: HTML normalized records 반환
+→ fallback 실패: CollectorError
 ```
 
-삭제 또는 비활성화 대상:
+삭제/비활성화:
 
 - `_bootstrap_session()`
-- `_looks_like_challenge_page()`
-- `JSESSIONID` 처리
-- `X-Requested-With` 헤더
-- `SOURCE_PAGE_URL`
-- `SOURCE_API_URL`
-- 서울안전누리 도메인 호출
+- 기존 challenge-page 로직
+- `JSESSIONID`
+- `X-Requested-With`
+- 서울안전누리 URL
 
-런타임 코드에는 legacy source toggle을 두지 않는다. 필요한 과거 코드는 Git history로 복구할 수 있다.
+### `app/mois_parser.py`
 
-### 5.2 Parser 분리
+- API success/error envelope
+- pagination metadata
+- field validation
+- KST datetime parsing
+- `RCPTN_RGN_NM` 서울 판정
+- `DisasterMessageRecord` 변환
 
-`app/parser.py`를 신규 API 전용으로 바꾸거나, 가독성을 위해 다음처럼 명확하게 이름을 분리한다.
+### `app/safekorea_fallback.py`
 
-```text
-app/mois_parser.py
-```
+- 서울 필터 URL 생성
+- list/detail HTML fetch
+- pagination
+- detail parsing
+- 서울 송출지역 재검증
+- normalized record 변환
 
-단, 모듈 하나를 추가하는 수준으로 유지하고 generic provider framework는 만들지 않는다.
-
-Parser 책임:
-
-- 최상위 성공/오류 envelope 검증
-- record list 존재 및 type 검증
-- stable source ID 추출
-- 발송시각을 `Asia/Seoul` timezone-aware datetime으로 변환
-- 수신지역 원문 보존
-- 메시지 본문 원문 보존
-- 서울 대상 필터 판정
-- `DisasterMessageRecord` 생성
-
-API 문서와 실제 응답을 확인하기 전에는 field name을 확정하지 않는다. 기존 필드명을 신규 API에 억지로 대입하지 않는다.
-
-### 5.3 `app/config.py`
+### `app/config.py`
 
 추가:
 
 ```python
 safetydata_service_key: str
+safetydata_fallback_enabled: bool
+safetydata_fallback_max_pages: int
+safetydata_fallback_request_timeout_seconds: float
 ```
 
 삭제:
@@ -165,129 +248,109 @@ SOURCE_PAGE_URL
 SOURCE_API_URL
 ```
 
-Startup 또는 collector 호출 시 `SAFETYDATA_SERVICE_KEY`가 없으면 명확하게 실패한다.
-
-예상 오류:
-
-```text
-SAFETYDATA_SERVICE_KEY is required for the MOIS SafetyData collector
-```
-
-Telegram bot의 `/latest`, `/history`, 템플릿 작업은 DB 조회만 사용하므로 키가 없더라도 원칙적으로 동작할 수 있다. 다만 `run_local`의 Poller child는 키 누락으로 반복 crash하지 않게 시작 전 설정 검증 또는 명확한 backoff가 필요하다.
-
-## 6. API 계약 확인 단계 — 구현 전 필수
-
-공식 안내 페이지는 Open API의 존재와 JSON/XML 제공 방식은 확인되지만, 로그인/활용승인 없이 현재 환경에서 다음 세부 계약을 검증할 수 없다.
-
-- 요청 파라미터 이름
-- JSON 선택 파라미터
-- 페이지 번호/페이지 크기 파라미터
-- 날짜 범위 파라미터 및 형식
-- 지역 필터 파라미터 지원 여부
-- 응답 최상위 envelope
-- record list 경로
-- stable ID field
-- 발송시각 field와 timezone
-- 메시지 본문 field
-- 수신지역 field
-- 결과 코드/오류 코드
-- 호출 한도와 갱신 주기
-
-따라서 구현 시 먼저 다음 read-only 명령을 추가한다.
+### Inspection commands
 
 ```bash
 python -m app.commands.inspect_mois_api
+python -m app.commands.inspect_safekorea_fallback
 ```
 
-동작:
+두 command는 read-only이며 secret과 원문을 기본 출력하지 않는다.
 
-1. `.env`의 `SAFETYDATA_SERVICE_KEY` 로드
-2. 최소 1회 요청
-3. service key를 절대 출력하지 않음
-4. HTTP status, content-type, 최상위 key, record count, 각 record의 field name/type만 출력
-5. 실제 본문과 실제 수신지역은 기본 출력하지 않음
-6. `--save-sanitized-fixture` 옵션일 때 식별 가능한 원문을 마스킹한 fixture만 저장
-7. 계약이 문서와 다르면 구현을 중단하고 질문/보고
+## 8. Fallback 활성화 조건
 
-이 검사가 통과하기 전에는 parser field mapping을 확정하지 않는다.
+Fallback 실행:
 
-## 7. 서울 대상 필터 정책
+- timeout/connect/DNS failure
+- HTTP 429
+- HTTP 5xx
+- 이전에 유효했던 key의 401/403
+- API-level error result code
+- invalid JSON
+- schema drift
+- required field 누락
+- pagination contract 오류
 
-판정은 메시지 본문 keyword가 아니라 **API의 공식 수신지역 field**를 기준으로 한다.
+Fallback 미실행:
 
-기본 포함 정책:
+- Service Key 미설정
+- invalid local config
+- 정상 API 0건
+- Poller가 local admin pause
+- Telegram send master switch만 OFF
 
-1. 수신지역에 `서울특별시` 또는 공식 서울 전체 코드가 포함
-2. 수신지역에 서울 25개 자치구가 포함
-3. 다중 수신지역 중 하나라도 서울특별시/서울 자치구에 해당
+다음 cycle에는 다시 API부터 시도한다. 별도 복잡한 장기 failover state machine은 만들지 않는다.
 
-서울 25개 자치구:
+## 9. Pagination과 조회기간
+
+Polling interval은 300초를 유지한다.
+
+Primary API:
+
+- `crtDt`는 KST 전일 또는 검증된 overlap 시작일
+- 최신순 조회 여부 확인
+- `numOfRows` 최대값 확인
+- 전체 page를 무한 반복하지 않도록 상한 설정
+
+Fallback:
+
+- KST 오늘과 최대 최근 1주일 범위
+- `currentPage=1`부터 증가
+- 동일 page ID 반복 시 중단
+- unseen item만 detail fetch
+- 최대 page 상한 적용
+
+## 10. 정상 0건 처리
+
+공식 API가 success envelope와 함께 0건을 반환하면 정상 no-op이다.
+
+기존 `EmptyWidgetError`를 그대로 사용해 Poll 실패로 기록하지 않는다.
+
+필요하면 다음처럼 의미를 분리한다.
 
 ```text
-강남구, 강동구, 강북구, 강서구, 관악구, 광진구, 구로구, 금천구,
-노원구, 도봉구, 동대문구, 동작구, 마포구, 서대문구, 서초구,
-성동구, 성북구, 송파구, 양천구, 영등포구, 용산구, 은평구,
-종로구, 중구, 중랑구
+ValidEmptyResult
+SourceContractError
 ```
 
-제외 원칙:
+정상 0건 때문에 fallback을 호출하거나 Telegram 경고를 보내지 않는다.
 
-- 본문에 서울이라는 단어만 등장하지만 수신지역이 서울이 아닌 메시지
-- 발신기관이 서울 소재라는 이유만으로 서울 수신으로 추정한 메시지
-- 지역 field가 불명확한데 임의로 서울로 추정한 메시지
+## 11. Cross-source 중복 방지
 
-보존 원칙:
+Primary와 fallback은 동일 문자에 서로 다른 source ID를 사용할 수 있다.
 
-- `sender_or_region`에는 API 수신지역 원문을 최대한 보존
-- 정규화된 서울 판정 결과는 raw payload 또는 별도 내부 함수 결과로만 사용
-- multi-region 문자열을 임의로 잘라 원문을 손실하지 않음
+```text
+MOIS:{SN}
+SAFEKOREA:{stable_detail_id}
+```
 
-서버 측 지역 필터가 제공되면 요청량 감소 목적으로 사용하되, client-side 서울 검증을 반드시 한 번 더 수행한다.
+따라서 구현 전에 양쪽 최근 항목을 비교한다.
 
-## 8. 정규화 field mapping
+- 발송시각
+- 본문
+- 수신/송출지역
+- 긴급단계
+- 재해구분
 
-실제 field name은 `inspect_mois_api` 결과로 확정한다.
+우선 기존 `raw_hash(sender_or_region, sent_at, original_body)`가 양쪽에서 동일한지 확인한다.
 
-| 정규화 필드 | 신규 API에서 필요한 의미 | 규칙 |
-|---|---|---|
-| `source_id` | 긴급재난문자 stable serial/sequence | 존재 시 그대로 사용 |
-| `sent_at` | 실제 문자 발송시각 | `Asia/Seoul`로 저장 |
-| `sender_or_region` | 공식 수신지역 원문 | 문자열/배열 형식을 원문 의미 보존 형태로 변환 |
-| `original_body` | 전체 재난문자 본문 | 요약·교정·trim 최소화, 전체 본문 보존 |
-| `source_url` | 공개 dataset URL | service key 없는 URL만 저장 |
-| `detected_at` | 우리 시스템의 수집시각 | 현재 KST |
-| `raw_payload` | 원본 record JSON | service key 없이 record만 저장 |
+동일하지 않으면 최소한의 source-neutral canonical fingerprint를 추가한다.
 
-stable ID가 없거나 신뢰할 수 없는 경우:
+- Unicode NFC
+- CRLF/LF 통일
+- whitespace 축약
+- 송출지역 token trim/sort
+- KST 발송시각 통일
 
-- API의 복합 key 조합을 공식 계약에 따라 사용
-- 최후 fallback은 기존 `raw_hash(sender_or_region, sent_at, original_body)`
-- 임의 index나 page position을 ID로 사용하지 않음
+본문 내용을 임의로 제거하거나 교정하지 않는다.
 
-## 9. Polling 및 Pagination
+API에서 먼저 수집된 항목을 fallback이 반환하거나, fallback에서 먼저 수집된 항목을 API가 반환해도 `telegram_deliveries`를 새로 만들지 않아야 한다.
 
-기존 `POLL_INTERVAL_SECONDS=300`은 유지한다.
+## 12. Source Cutover
 
-신규 API의 pagination/date filter를 계약 검사 후 다음 원칙으로 구현한다.
+Collector 교체만 하면 기존 DB와 다른 source ID 때문에 최근 문자가 재발송될 수 있다.
 
-1. 최신 순으로 조회
-2. 충분한 overlap window를 포함
-3. `source_id` 및 raw hash로 DB dedup
-4. 최신 페이지가 장애로 일부 누락돼도 다음 poll에서 재수집 가능
-5. 한 poll에서 지나치게 많은 과거 페이지를 반복 조회하지 않음
-6. API 호출량 제한을 넘지 않음
-7. valid empty result는 정상 no-op으로 처리
-8. 인증 오류, API resultCode 오류, schema 오류는 hard failure로 처리
-
-현재의 `EmptyWidgetError` 의미는 재검토한다. 공식 API에서 정상적으로 record 0건을 반환하면 Poll 실패가 아니라 성공적인 no-op이어야 한다.
-
-## 10. Source cutover와 중복 재발송 방지
-
-이 부분은 필수이다.
-
-기존 서울안전누리와 신규 행안부 API가 같은 문자에 대해 서로 다른 source ID 또는 지역 문자열을 제공할 수 있다. 단순히 collector만 교체하면 이미 DB에 있는 최근 문자가 신규 record로 인식되어 두 운영자 모두에게 재발송될 수 있다.
-
-명시적인 cutover 명령을 추가한다.
+명시적 cutover command를 추가한다.
 
 ```bash
 python -m app.commands.source_cutover_mois --inspect
@@ -296,214 +359,181 @@ python -m app.commands.source_cutover_mois --bootstrap
 
 `--inspect`:
 
-- 기존 DB 변경 없음
-- 신규 API에서 조회될 record 수
-- 기존 DB와 exact source ID match 수
-- raw hash match 수
-- timestamp/body 유사 match 후보 수
-- 신규로 보이는 record 수
-- service key 비노출
+- DB 변경 없음
+- API/HTML 현재 window 조회
+- source ID match
+- raw hash match
+- canonical match 후보
+- 신규로 보이는 항목 수
 
 `--bootstrap`:
 
-1. 서비스/Poller 정지 상태 확인
-2. DB backup 존재 확인
-3. 신규 API의 현재 조회 window를 수집
-4. 현재 조회된 모든 record를 cutover baseline으로 저장하거나 tombstone/equivalent 처리
-5. Telegram delivery row를 생성하지 않음
-6. source cutover marker 기록
-7. 완료 후 이후 발송시각의 신규 record만 정상 fan-out
+1. Poller 정지 확인
+2. DB + WAL/SHM backup 확인
+3. API 및 fallback current window 수집
+4. 현재 항목을 baseline/cross-source known 처리
+5. Telegram delivery 생성 금지
+6. cutover marker 기록
+7. idempotent 재실행 보장
 
-권장 최소 system state:
+첫 v0.5.0 cycle에서 과거 문자 발송은 0건이어야 한다.
 
-```text
-active_source = mois_safetydata_api
-source_cutover_at = <KST timestamp>
-source_bootstrap_completed = true
-```
+## 13. 기존 후속 기능 유지
 
-Schema 변경을 더 줄일 수 있으면 기존 control/audit table에 명시적 source cutover event를 기록해도 되지만, 재시작 후에도 cutover 완료 여부를 확실하게 판정할 수 있어야 한다.
+다음은 변경하지 않는다.
 
-자동으로 기존 서울안전누리 API와 신규 API를 동시에 호출해 비교하는 dual-run은 하지 않는다. 기존 source가 이미 신뢰 불가하기 때문이다.
-
-## 11. 기존 후속 기능 보존
-
-신규 collector가 `DisasterMessageRecord`를 동일하게 반환하면 다음은 그대로 유지한다.
-
-- `app/commands/poll_once.py`
-  - active personal subscriptions fan-out
-  - 사용자별 `telegram_deliveries`
-  - 사용자별 retry
-- `/latest`
-- `/history`
-- 카테고리/템플릿 버튼
+- SQLite messages/dedup/retention
+- 독립 `telegram_subscriptions`
+- 사용자별 `telegram_deliveries`
+- 사용자별 retry
+- `/latest`, `/history`, `/status`, `/help`
+- `/subscribe`, `/unsubscribe`, `/mute`, `/unmute`
+- `/pause`, `/resume` 개인 alias
+- 카테고리/템플릿 선택
 - Rule Preview
 - AI Preview
 - Final OK
 - 사용자별 Preview/Decision 독립성
-- `/subscribe`, `/unsubscribe`, `/mute`, `/unmute`
-- `/pause`, `/resume` 개인 alias
-- 19개 자동화 템플릿 및 Excel/YAML sync
-- 90일 운영 DB retention
-- 5,005건 historical raw DB 분리
+- 19개 자동화 템플릿
+- Excel/YAML sync
+- 별도 5,005건 historical raw DB
 
-후속 로직에서 source-specific field를 직접 참조하면 안 된다. 모든 후속 코드는 normalized model만 사용해야 한다.
+후속 코드는 API/HTML field name을 직접 참조하지 않고 normalized model만 사용한다.
 
-## 12. 오류 처리
+## 14. 관측성
 
-다음은 Poll 실패로 기록하고 Telegram 자동 발송을 수행하지 않는다.
+각 Poll cycle에 기록:
 
-- service key 없음
-- HTTP 401/403
-- HTTP 429
-- HTTP 5xx 재시도 소진
-- API envelope의 실패 result code
-- JSON이 아닌 응답
-- required field 누락
-- 발송시각 parse 실패
-- 본문 누락
-- pagination 반복/무한 loop 감지
+- primary outcome
+- fallback attempted
+- fallback outcome
+- actual source method
+- fetched count
+- Seoul included count
+- duplicate/new count
+- elapsed time
 
-재시도:
+권장 method:
 
-- timeout/connect error 및 5xx: bounded exponential backoff
-- 429: `Retry-After`가 있으면 우선 적용, 없으면 longer backoff
-- 401/403: 반복 재시도하지 않고 인증 오류로 명확히 기록
+```text
+mois_safetydata_api
+safekorea_html_fallback
+```
 
-절대 하지 않을 것:
+Primary 실패 후 fallback 성공은 수집 성공이지만 degraded 상태로 기록한다.
 
-- 오류 시 기존 서울안전누리 scraper 호출
-- partial record를 Telegram으로 전송
-- API 오류 HTML/JSON 전체를 로그에 출력
-- service key가 포함된 URL 출력
+`/status`에는 다음을 추가할 수 있다.
 
-## 13. 테스트 계획
+```text
+최근 수집 원천: 행정안전부 API
+```
 
-### Collector/API contract
+또는
 
-- service key 누락 시 fail-fast
-- JSON success fixture
-- JSON empty fixture
-- API-level error fixture
+```text
+최근 수집 원천: 국민안전24 Fallback
+```
+
+## 15. 테스트
+
+### API
+
+- key 누락 fail-fast
+- success JSON
+- valid empty
+- API-level error
 - 401/403/429/500
-- timeout/retry/backoff
-- pagination 종료
+- timeout/backoff
+- pagination
 - schema drift
-- service key log redaction
-- 서울안전누리 도메인 호출이 0회임을 검증
+- key redaction
 
 ### 서울 필터
 
-- 서울특별시 전체
-- 25개 각 자치구
-- `서울특별시 강남구`
-- multi-region 중 서울 포함
+- 서울 전체
+- 25개 자치구
+- 복수지역 중 서울 포함
 - 서울 미포함
 - 본문에만 서울 포함
-- 유사 문자열 false positive
-- 배열/문자열 수신지역 형식
 
-### Normalization
+### Fallback
 
-- stable ID
-- KST datetime
-- full body 보존
-- raw payload 보존
-- source URL에 key 없음
-- raw hash deterministic
+- 서울 URL 생성
+- dynamic KST date
+- list/detail fixture
+- pagination
+- empty marker
+- malformed/challenge page
+- 본문/발송일시/긴급단계/송출지역
 
-### Cutover
+### Failover
 
-- 기존 DB가 있어도 첫 신규 API window를 재발송하지 않음
-- bootstrap idempotent
-- bootstrap 중 Telegram delivery 미생성
-- bootstrap 후 신규 record만 A/B 양쪽에 전달
-- 기존 두 사용자 subscription/decision 유지
+- API 성공 → fallback 0회
+- API 정상 0건 → fallback 0회
+- API hard failure → fallback
+- 둘 다 실패 → 발송 0건
+- key 누락 → fallback 0회
+
+### Cross-source dedup
+
+- API → HTML 동일 항목
+- HTML → API 동일 항목
+- whitespace/지역 순서 차이
+- false merge 방지
 
 ### Regression
 
-- two independent Telegram users fan-out
-- one recipient failure/retry isolation
-- `/latest`, `/history`
-- Preview/Decision per operator
-- AI worker independence
-- personal mute/unmute
+- 두 명 이상 독립 Telegram fan-out
+- 사용자별 retry
+- Template/AI/Decision 독립성
 - 300초 polling
-- Excel/YAML sync 21/19/2
+- Excel/YAML 21/19/2
 
-## 14. 구현 순서
+## 16. 구현 순서
 
-### Phase 0 — API 계약 확인
+1. 사용자가 `.env`에 Service Key 입력
+2. `inspect_mois_api` 실행
+3. 실제 JSON envelope와 pagination 확정
+4. `inspect_safekorea_fallback` 실행
+5. list/detail selector와 `bbsSn` 안정성 확정
+6. 서울 필터 completeness 비교
+7. 양 source 최근 항목 비교
+8. cross-source dedup 방식 확정
+9. Collector/parser 구현
+10. cutover command 구현
+11. DB copy 검증
+12. tests/lint/format/validator
+13. tmux 정지 및 backup
+14. cutover bootstrap
+15. v0.5.0 시작
+16. 과거 발송 0건 확인
+17. 신규 문자 모든 active 사용자 fan-out 확인
 
-1. 사용자가 로컬 `.env`에 `SAFETYDATA_SERVICE_KEY` 입력
-2. `inspect_mois_api` 구현/실행
-3. 실제 요청 파라미터와 response field 확정
-4. sanitized fixture 생성
-5. 이 문서의 field mapping section 업데이트
+## 17. 완료 조건
 
-### Phase 1 — Collector 교체
+- 기존 서울안전누리 runtime 호출 0회
+- API 정상 시 fallback 호출 0회
+- API hard failure 시 SafeKorea fallback
+- 정상 0건 오판 없음
+- 서울 수신/송출지역 기준 정확한 필터
+- Service Key 비노출
+- API/HTML 동일 문자 중복 발송 0건
+- 첫 cutover 과거 문자 발송 0건
+- 두 명 이상 독립 사용자 regression 없음
+- API와 fallback 모두 실패 시 fail-closed
+- 문서, `.env.example`, tests, CHANGELOG, version 업데이트
+- 목표 버전 v0.5.0
 
-1. config/env 추가
-2. MOIS collector/parser 구현
-3. 서울 필터 구현
-4. 기존 서울안전누리 runtime code 제거
-5. unit tests
+## 18. 구현 전에 반드시 확인할 항목
 
-### Phase 2 — Cutover 안전장치
+1. SafetyData JSON 최상위 envelope
+2. data list 경로 및 pagination metadata
+3. `CRT_DT` 실제 형식
+4. `rgnNm=서울특별시`의 복수지역 포함 여부
+5. 국민안전24 list/detail selector
+6. `bbsSn` stable ID 여부
+7. 국민안전24 조회기간 inclusive 규칙
+8. API와 HTML field 값 동일성
+9. 기존 raw hash로 cross-source dedup 가능한지
 
-1. source cutover inspect/bootstrap command
-2. DB-copy 검증
-3. 재발송 방지 테스트
-4. 운영 runbook 업데이트
-
-### Phase 3 — 배포
-
-1. `seoulnews` tmux 서비스 정지
-2. SQLite + WAL/SHM 일관 backup
-3. `.env` key 설정 확인
-4. API inspect 통과
-5. cutover inspect
-6. cutover bootstrap
-7. 최신 main으로 서비스 시작
-8. 첫 poll에서 과거 알림 미발송 확인
-9. 다음 신규 문자에서 모든 active operator에게 독립 fan-out 확인
-
-## 15. 버전
-
-현재 v0.4.1에서 공식 실시간 source를 교체하는 기능 변경이므로 목표 버전은 다음을 권장한다.
-
-```text
-v0.5.0
-```
-
-단순 patch가 아니라 collector 계약, 환경변수, cutover 절차가 추가되기 때문이다.
-
-## 16. 구현 완료 조건
-
-- 기존 서울안전누리 URL 요청이 runtime에서 0회
-- 공식 SafetyData API만 실시간 source로 사용
-- service key가 Git/log/DB에 없음
-- 서울특별시/25개 자치구 대상만 수집
-- 응답 전체 본문과 발송시각 보존
-- valid empty result 정상 처리
-- schema/error 실패 시 자동 발송 없음
-- 첫 cutover에서 과거 문자 재발송 없음
-- 이후 신규 문자 A/B/N active 사용자에게 독립 발송
-- Telegram/템플릿/AI/Decision 기존 기능 regression 없음
-- tests, lint, format, offline validator 통과
-- 문서와 `.env.example` 업데이트
-- live two-user validation 완료 후 tag
-
-## 17. 구현 전 확인이 필요한 사항
-
-아래 항목은 service key를 이용한 실제 1회 contract inspection 전에는 확정할 수 없다.
-
-1. API 활용 신청 및 key가 현재 활성 상태인지
-2. key가 encoded/decoded 중 어느 형태인지
-3. JSON 응답을 요청하는 정확한 파라미터
-4. pagination/date/region 파라미터 이름과 허용 범위
-5. stable ID, 본문, 발송시각, 수신지역의 실제 field name
-6. 서울 수신지역이 `서울특별시`, 자치구명, 행정코드 중 어떤 형태로 반환되는지
-7. 호출 한도 및 데이터 갱신 지연
-
-이 중 field 계약이 확인되지 않으면 추측으로 구현하지 말고 작업을 중단한 뒤 사용자에게 sanitized schema를 보고하고 확인을 받아야 한다.
+확인되지 않은 계약을 추측으로 구현하지 않는다. 로컬 inspection 결과가 문서와 다르면 작업을 중단하고 차이를 보고한 뒤 결정한다.

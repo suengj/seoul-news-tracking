@@ -301,7 +301,7 @@ def _check_independent_fan_out(db_path: Path, check) -> None:
         return httpx.Response(200, json=_load_json("mois_success.json"))
 
     original_fetch = poll_once.fetch_records
-    poll_once.fetch_records = lambda: fetch_records(
+    poll_once.fetch_records = lambda **_kwargs: fetch_records(
         settings, mois_transport=httpx.MockTransport(mois_handler)
     )
 
@@ -324,7 +324,7 @@ def _check_independent_fan_out(db_path: Path, check) -> None:
             item["SN"] = item["SN"] + 1000
             item["CRT_DT"] = item["CRT_DT"].replace("2026/07/14", "2026/07/15")
             item["MSG_CN"] = item["MSG_CN"] + " (second cycle)"
-        poll_once.fetch_records = lambda: fetch_records(
+        poll_once.fetch_records = lambda **_kwargs: fetch_records(
             settings,
             mois_transport=httpx.MockTransport(
                 lambda request: httpx.Response(200, json=second_payload)

@@ -101,12 +101,15 @@ def _row_is_empty_marker(row: Tag) -> bool:
 
 
 def _extract_body(link: Tag) -> str:
-    """Full message body from the row's <a> text, converting any <br> to a
-    newline first (some rows carry the newline as a literal character
-    already; either way no summarization/truncation is applied)."""
-    for br in link.find_all("br"):
-        br.replace_with("\n")
-    return link.get_text(strip=True)
+    """Full message body from the row's <a> text, with any <br> becoming a
+    newline (some rows carry the newline as a literal character already;
+    either way no summarization/truncation is applied). get_text's own
+    separator is used rather than replacing <br> tags with a literal "\\n"
+    first — get_text(strip=True) strips each text fragment individually
+    before joining with an empty separator, which would silently discard a
+    manually-inserted "\\n" node and concatenate multi-line bodies with no
+    separator at all."""
+    return link.get_text("\n", strip=True)
 
 
 def _extract_meta(paragraph: Tag) -> dict[str, str | None]:

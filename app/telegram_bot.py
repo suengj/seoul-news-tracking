@@ -138,6 +138,7 @@ _PERSONAL_STATUS_LABEL = {
 _SOURCE_METHOD_LABEL = {
     "mois_safetydata_api": "행정안전부 API",
     "safekorea_html_fallback": "국민안전24 fallback",
+    "none": "수집 실패 (원천 없음)",
 }
 
 

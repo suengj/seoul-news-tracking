@@ -64,6 +64,33 @@ cross-source deduplication changed. See
   after `RCPTN_RGN_NM` filtering) is now a successful no-op `CollectionResult`,
   not an exception — `poll_once`/`poller` no longer treat it as a failed run.
 
+### Fixed
+- `app/safekorea_fallback.py`: a body containing `<br>` tags was silently
+  concatenated with no separator at all (`get_text(strip=True)` strips each
+  text fragment individually, discarding a manually-inserted newline before
+  joining) — now uses `get_text("\n", strip=True)` directly.
+- `app/commands/poll_once.py`: the v0.5.0 source-cutover safety gate only
+  applied to `--send` runs, but a plain `poll_once` (no `--send`) still
+  inserted `new_records` unconditionally on a pre-existing, not-yet-
+  bootstrapped database — permanently marking the current cutover window as
+  "already known" and silently losing those records from ever being
+  delivered, even after a later `--bootstrap`/`--send`. The gate now applies
+  to any real (non-`--dry-run`) collection cycle.
+- `app/commands/poll_once.py` / `app/collector.py`: a full-outage cycle
+  (both MOIS and SafeKorea fail) never updated
+  `system_state.last_primary_error_category`, leaving `/status` reporting a
+  stale category from an earlier, unrelated degraded-but-successful cycle.
+  `CollectorError` now carries `primary_error_category` so the failure path
+  can record it (`최근 수집 원천` shows `수집 실패 (원천 없음)` for this case).
+- `app/commands/establish_baseline.py`: the fresh-database baseline run
+  never called `db.mark_source_bootstrap_completed()`, so `poll_once`'s
+  cutover gate would keep demanding an explicit `source_cutover_mois
+  --bootstrap` run afterward even though the baseline run already did the
+  equivalent (insert-only, nothing sent) work.
+- `app/commands/poll_once.py` / `app/commands/establish_baseline.py`: both
+  called `fetch_records()` without passing the already-loaded `settings`,
+  causing a redundant, avoidable second `load_settings()` call.
+
 ### Removed
 - Runtime Seoul SafeCity `JSESSIONID`/XHR collector (`app/parser.py`,
   `app/commands/discover_source.py`, `SOURCE_PAGE_URL`/`SOURCE_API_URL`,

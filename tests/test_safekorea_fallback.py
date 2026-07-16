@@ -4,10 +4,12 @@ from pathlib import Path
 
 import httpx
 import pytest
+from bs4 import BeautifulSoup
 
 from app.safekorea_fallback import (
     SafeKoreaRuntimeError,
     SafeKoreaSchemaError,
+    _extract_body,
     fetch_records,
 )
 
@@ -67,6 +69,15 @@ def test_full_body_present_without_detail_fetch(settings):
     assert request_count["n"] == 1
     body_lengths = {r.source_id: len(r.original_body) for r in records}
     assert all(length > 0 for length in body_lengths.values())
+
+
+def test_extract_body_inserts_newline_for_br():
+    """A row whose body contains <br> tags must keep the lines separated —
+    get_text(strip=True) on the raw string would otherwise concatenate them
+    with no separator at all (see safekorea_fallback._extract_body)."""
+    soup = BeautifulSoup("<a>line one<br/>line two<br/>line three</a>", "html.parser")
+    link = soup.find("a")
+    assert _extract_body(link) == "line one\nline two\nline three"
 
 
 def test_multi_region_seoul_record_included(settings):

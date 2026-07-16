@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         # Fully read-only: not even a run_history row is written.
         try:
-            result = fetch_records()
+            result = fetch_records(settings=settings)
         except CollectorError as exc:
             print(f"FAILED: {exc}", file=sys.stderr)
             return 1
@@ -267,10 +267,15 @@ def run_poll_cycle(settings: Settings, *, send: bool, notify_existing: bool) -> 
         # `source_cutover_mois --bootstrap` has already registered the
         # current window as a known baseline. A genuinely empty (fresh)
         # database does not need this — the existing was_empty baseline
-        # path below already covers it. Only automatic delivery (send=True)
-        # is refused; --dry-run and collection-only runs still work so the
-        # operator can inspect state without needing to send anything.
-        if send and not was_empty and not db.is_source_bootstrap_completed():
+        # path below already covers it. This gate applies regardless of
+        # --send: a non-send run still inserts new_records further below
+        # (is_baseline=False), which would permanently mark the current
+        # cutover window as "already known" — a later --bootstrap run would
+        # then skip them as already-known instead of registering them as
+        # baseline, and a subsequent --send run would never see them as new
+        # either, silently losing them. --dry-run performs no DB writes at
+        # all and is unaffected (see the dry-run branch in main() above).
+        if not was_empty and not db.is_source_bootstrap_completed():
             db.finish_run(
                 run_id,
                 status="failed",
@@ -281,9 +286,12 @@ def run_poll_cycle(settings: Settings, *, send: bool, notify_existing: bool) -> 
             return 1
 
         try:
-            result = fetch_records()
+            result = fetch_records(settings=settings)
         except CollectorError as exc:
             db.record_poll_error(str(exc))
+            db.record_collection_source(
+                method="none", primary_error_category=exc.primary_error_category
+            )
             db.finish_run(run_id, status="failed", detail=str(exc), store_successful_noop_runs=True)
             print(f"FAILED: {exc}", file=sys.stderr)
             return 1

@@ -21,10 +21,17 @@ currently-visible MOIS/SafeKorea window as a known baseline (same mechanism
 the existing `is_baseline` flag already uses for a fresh v0.4.x install) —
 without ever creating a `telegram_deliveries` row or a
 `template_suggestions` row. The Poller (`app/commands/poll_once.py`) refuses
-live automatic delivery (`--send`) on a non-empty database until
-`system_state.source_bootstrap_completed = true`. A genuinely empty
-(fresh-install) database does not need this step — its own first poll cycle
-already establishes a safe baseline the same way v0.4.x always did.
+**any** real (non-`--dry-run`) collection cycle on a non-empty database until
+`system_state.source_bootstrap_completed = true` — not just `--send` runs.
+A plain `poll_once` (no `--send`) still inserts `new_records` unconditionally,
+so allowing it to proceed on a not-yet-bootstrapped database would
+permanently mark the current cutover window as "already known": a later
+`--bootstrap` run would then skip those records as already-known instead of
+registering them as baseline, and a subsequent `--send` run would never see
+them as new either — silently losing them. `--dry-run` performs no database
+writes at all and is unaffected. A genuinely empty (fresh-install) database
+does not need this step — its own first poll cycle already establishes a
+safe baseline the same way v0.4.x always did.
 
 ## 2. Preconditions
 
@@ -140,6 +147,12 @@ never a message body. If the fallback is used repeatedly, check that
 category first: `auth_failed` almost always means the service key needs
 re-verification with `inspect_mois_api`; `rate_limited`/`timeout` may just
 need `SAFETYDATA_NUM_OF_ROWS` lowered.
+
+If both MOIS and SafeKorea fail in the same cycle (total outage), `최근 수집
+원천` shows `수집 실패 (원천 없음)` (internal method `"none"`) and `Primary 최근
+오류` still reflects that cycle's real failure category — this is recorded
+on every failed cycle specifically so a full outage never leaves a stale
+category from an earlier, unrelated degraded-but-successful cycle.
 
 ## 9. Resuming the shared collector after cutover
 

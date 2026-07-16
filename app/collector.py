@@ -45,7 +45,16 @@ class CollectorError(RuntimeError):
     """Raised for any condition that must abort collection rather than send
     incomplete/duplicate data: a primary configuration failure (fail fast,
     never fallback-eligible), or a primary hard failure with no working
-    fallback (fail closed)."""
+    fallback (fail closed).
+
+    `primary_error_category` carries the same sanitized category used in
+    `CollectionResult` (see below) so a caller that only sees the exception
+    — e.g. a full-outage poll cycle where no CollectionResult is ever built —
+    can still record it for /status observability."""
+
+    def __init__(self, message: str, *, primary_error_category: str | None = None) -> None:
+        super().__init__(message)
+        self.primary_error_category = primary_error_category
 
 
 @dataclass
@@ -113,14 +122,20 @@ def fetch_records(
     try:
         records = mois_api.fetch_records(settings, transport=mois_transport)
     except mois_api.MoisConfigError as exc:
-        raise CollectorError(f"MOIS API configuration error: {exc}") from exc
+        # A missing/blank service key is a configuration failure, not a
+        # runtime auth rejection, but the operator remediation is identical
+        # (re-verify the key with inspect_mois_api) — categorize the same way.
+        raise CollectorError(
+            f"MOIS API configuration error: {exc}", primary_error_category="auth_failed"
+        ) from exc
     except mois_api.MoisApiError as exc:
         error_category = _classify_primary_error(exc)
         logger.warning("MOIS API hard failure (%s): %s", error_category, exc)
 
         if not settings.safekorea_fallback_enabled:
             raise CollectorError(
-                f"MOIS API failed ({error_category}) and SafeKorea fallback is disabled"
+                f"MOIS API failed ({error_category}) and SafeKorea fallback is disabled",
+                primary_error_category=error_category,
             ) from exc
 
         try:
@@ -129,7 +144,8 @@ def fetch_records(
             )
         except safekorea_fallback.SafeKoreaError as fallback_exc:
             raise CollectorError(
-                f"MOIS API failed ({error_category}) and SafeKorea fallback also failed: {fallback_exc}"
+                f"MOIS API failed ({error_category}) and SafeKorea fallback also failed: {fallback_exc}",
+                primary_error_category=error_category,
             ) from fallback_exc
 
         logger.warning(

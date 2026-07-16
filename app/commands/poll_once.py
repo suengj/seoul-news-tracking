@@ -16,8 +16,10 @@ this run is itself acting as the baseline) — in that baseline case nothing
 is sent unless --notify-existing is also given, per the "don't notify on
 first run" requirement.
 
-Automatic delivery is personal (v0.4.0): each genuinely new SafeCity record
-fans out independently to every active personal subscription
+Automatic delivery is personal (v0.4.0): each genuinely new disaster-message
+record (from the MOIS API or, on primary failure, the SafeKorea HTML
+fallback — see app/collector.py) fans out independently to every active
+personal subscription
 (`telegram_subscriptions`), one `telegram_deliveries` row per recipient. One
 recipient's failure never blocks another; retries target only that
 recipient's failed/pending delivery. There is no single primary recipient
@@ -33,7 +35,7 @@ import argparse
 import logging
 import sys
 
-from app.collector import CollectorError, EmptyWidgetError, fetch_records
+from app.collector import CollectorError, fetch_records
 from app.commands._shared import record_preview
 from app.config import Settings, load_settings
 from app.database import Database, open_database
@@ -70,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         # Fully read-only: not even a run_history row is written.
         try:
             result = fetch_records()
-        except (EmptyWidgetError, CollectorError) as exc:
+        except CollectorError as exc:
             print(f"FAILED: {exc}", file=sys.stderr)
             return 1
 
@@ -245,24 +247,58 @@ def _fan_out_and_retry(
     return (sent_count, failed_count)
 
 
+CUTOVER_REQUIRED_MESSAGE = (
+    "Run python -m app.commands.source_cutover_mois --bootstrap before "
+    "enabling the v0.5.0 collector."
+)
+
+
 def run_poll_cycle(settings: Settings, *, send: bool, notify_existing: bool) -> int:
     """Execute one real (non-dry-run) poll cycle. Used by both the CLI and app/poller.py."""
     with open_database(settings.database_path) as db:
         run_id = db.start_run("poll_once")
 
+        was_empty = db.is_empty
+
+        # v0.5.0: an existing (non-empty) database predates the MOIS/SafeKorea
+        # source cutover — its stored source_ids are from the retired Seoul
+        # SafeCity collector, so every currently-visible MOIS/SafeKorea
+        # record would look "new" and cause a historical send burst unless
+        # `source_cutover_mois --bootstrap` has already registered the
+        # current window as a known baseline. A genuinely empty (fresh)
+        # database does not need this — the existing was_empty baseline
+        # path below already covers it. Only automatic delivery (send=True)
+        # is refused; --dry-run and collection-only runs still work so the
+        # operator can inspect state without needing to send anything.
+        if send and not was_empty and not db.is_source_bootstrap_completed():
+            db.finish_run(
+                run_id,
+                status="failed",
+                detail="source cutover bootstrap required",
+                store_successful_noop_runs=True,
+            )
+            print(f"FAILED: {CUTOVER_REQUIRED_MESSAGE}", file=sys.stderr)
+            return 1
+
         try:
             result = fetch_records()
-        except (EmptyWidgetError, CollectorError) as exc:
+        except CollectorError as exc:
             db.record_poll_error(str(exc))
             db.finish_run(run_id, status="failed", detail=str(exc), store_successful_noop_runs=True)
             print(f"FAILED: {exc}", file=sys.stderr)
             return 1
 
+        db.record_collection_source(
+            method=result.method, primary_error_category=result.primary_error_category
+        )
+
         print(f"selected method     : {result.method}")
         print(f"records fetched      : {result.fetched_count}")
         print(f"full text confirmed  : {result.full_text_confirmed}")
-
-        was_empty = db.is_empty
+        if result.fallback_used:
+            print(
+                f"status               : degraded (fallback used, primary: {result.primary_error_category})"
+            )
 
         new_records: list[DisasterMessageRecord] = []
         duplicate_records: list[DisasterMessageRecord] = []
@@ -278,6 +314,17 @@ def run_poll_cycle(settings: Settings, *, send: bool, notify_existing: bool) -> 
         is_baseline_run = was_empty
         for record in new_records:
             db.insert(record, is_baseline=is_baseline_run)
+
+        if is_baseline_run:
+            # This cycle established its own baseline on a database that was
+            # empty at the start (a fresh install, or a database that has
+            # never collected anything) — that is itself a safe cutover, so
+            # mark it complete here too. This is what lets a fresh database
+            # go straight from baseline to normal delivery on the very next
+            # cycle, without needing an explicit `source_cutover_mois
+            # --bootstrap` run (that command remains required only for a
+            # database carrying pre-v0.5.0 history — see the gate above).
+            db.mark_source_bootstrap_completed()
 
         sent_count = 0
         failed_count = 0

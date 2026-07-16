@@ -1,8 +1,10 @@
 # Independent Telegram Operators (v0.4.0)
 
 Every authorized operator is an **equal, independent entity**. There is no
-primary operator, no default chat, and no broadcast recipient. The SafeCity
-collector and the `messages` database stay **shared**; everything an operator
+primary operator, no default chat, and no broadcast recipient. The shared
+collector (MOIS API / SafeKorea fallback since v0.5.0 — see
+`docs/live_source_migration_mois_api_plan.md`) and the `messages` database
+stay **shared**; everything an operator
 *experiences* — automatic delivery, commands, previews, Final-OK decisions,
 on-demand AI, and mute/subscribe state — is **personal and isolated**.
 
@@ -14,7 +16,7 @@ interactive fallback.
 
 ```mermaid
 flowchart TD
-    Poller[SafeCity Poller] --> Msgs[(Shared messages DB)]
+    Poller[MOIS API / SafeKorea fallback Poller] --> Msgs[(Shared messages DB)]
     Msgs --> Fan[telegram_deliveries fan-out]
     Fan --> A["Operator A · private chat"]
     Fan --> B["Operator B · private chat"]
@@ -24,8 +26,8 @@ flowchart TD
     BF --> BD["B's decision (per operator+chat)"]
 ```
 
-- **Shared**: SafeCity collection, dedup, the `messages` table, run history,
-  retention.
+- **Shared**: collection (MOIS API / SafeKorea fallback), dedup, the
+  `messages` table, run history, retention.
 - **Personal**: subscription/mute state, automatic delivery + retry, every
   interactive reply, previews, decisions, and AI generations — each keyed to
   the operator (`user_id`) and their private chat (`interaction_chat_id`).
@@ -71,7 +73,7 @@ and never rerouted to a private chat.
 
 Since v0.4.0, Telegram `/pause` and `/resume` are **personal** mute/unmute
 aliases and never touch the shared collector's `system_state.polling_enabled`.
-The **only** explicit control over the shared SafeCity collector is a
+The **only** explicit control over the shared collector is a
 local-only command run on the host — it is not a Telegram command and is not
 exposed via `/help`:
 
@@ -96,7 +98,7 @@ service; shared collection is a host-local administrative concern.
 
 ## Per-recipient automatic delivery (`telegram_deliveries`)
 
-Each genuinely new SafeCity record fans out to every active subscription, one
+Each genuinely new disaster-message record fans out to every active subscription, one
 delivery row per recipient (`UNIQUE(message_id, subscription_id)`):
 
 1. Store the source once.

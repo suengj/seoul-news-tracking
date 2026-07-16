@@ -133,6 +133,13 @@ _PERSONAL_STATUS_LABEL = {
     "none": "미등록",
 }
 
+# v0.5.0: collector.METHOD_MOIS_API / collector.METHOD_SAFEKOREA_FALLBACK
+# mapped to the shared /status display label (no URL, no secret).
+_SOURCE_METHOD_LABEL = {
+    "mois_safetydata_api": "행정안전부 API",
+    "safekorea_html_fallback": "국민안전24 fallback",
+}
+
 
 def _format_iso(value: str | None) -> str | None:
     if not value:
@@ -213,6 +220,20 @@ def build_status_reply(
         lines.append(
             f"마지막 신규 문자: {escape_markdown_v2(format_timestamp(state.last_new_message_at))}"
         )
+
+    # v0.5.0 source observability (see docs/live_source_migration_mois_api_plan.md
+    # §14). Never shows the service key, a request URL/query string, or the
+    # message body — only the source label and a short sanitized error category.
+    source_label = _SOURCE_METHOD_LABEL.get(
+        state.last_collection_source, state.last_collection_source
+    )
+    lines.append(escape_markdown_v2(f"최근 수집 원천: {source_label if source_label else '없음'}"))
+    lines.append(
+        escape_markdown_v2(
+            f"Primary 최근 오류: {state.last_primary_error_category if state.last_primary_error_category else '없음'}"
+        )
+    )
+
     lines.append(escape_markdown_v2(f"저장된 문자: {report['total_messages']}건"))
     lines.append(escape_markdown_v2(f"DB 보관기간: {settings.message_retention_days}일"))
     lines.append(escape_markdown_v2(f"실행이력 보관기간: {settings.run_history_retention_days}일"))

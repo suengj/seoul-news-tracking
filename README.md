@@ -1,21 +1,29 @@
 # Seoul News Tracking — Service v1
 
-Collects the 재난문자 (disaster message) records shown in the Seoul SafeCity
-dashboard widget, deduplicates them locally, and delivers them to Telegram
-with a **human-first** template workflow: an operator always picks the
-template, previews the rendered draft, and explicitly confirms before
-anything counts as a final result. See `docs/service_v1.md` for the full
-product description, and `docs/part1_completion_report.md` for what was
-actually run and verified.
+Collects 재난문자 (disaster message) records for Seoul from the official
+행정안전부(MOIS) SafetyData Open API (`DSSP-IF-00247`), with a conditional
+국민안전24 HTML fallback used only when the API has a hard failure in the same
+poll cycle, deduplicates them locally, and delivers them to Telegram with a
+**human-first** template workflow: an operator always picks the template,
+previews the rendered draft, and explicitly confirms before anything counts
+as a final result. See `docs/service_v1.md` for the full product
+description, `docs/live_source_migration_mois_api_plan.md` and
+`docs/mois_api_contract_confirmed.md` for the live-source contract, and
+`docs/part1_completion_report.md` for what was actually run and verified.
+
+The previous Seoul SafeCity `JSESSIONID`/XHR collector is retired as of
+**v0.5.0** — see `docs/source_discovery.md` (marked RETIRED) and
+`docs/source_cutover_runbook.md`.
 
 No automatic template selection, no automatic publishing anywhere, no X
 posting, no server/VPS deployment yet (see "Known limitations" below and
 `docs/local_runtime.md`).
 
 Since **v0.4.0** every authorized operator is an equal, independent entity:
-the SafeCity collector and `messages` DB stay shared, but automatic delivery,
-commands, previews, decisions, AI, and mute/subscribe state are fully
-personal. There is no primary operator and no default chat — see
+the shared collector (MOIS API / SafeKorea fallback since v0.5.0) and
+`messages` DB stay shared, but automatic delivery, commands, previews,
+decisions, AI, and mute/subscribe state are fully personal. There is no
+primary operator and no default chat — see
 `docs/independent_operator_model.md`.
 
 ## Setup
@@ -46,10 +54,19 @@ startup log).
 ## Commands
 
 ```bash
-# Read-only: fetch once, report the method and a preview. No DB writes, no sends.
-python -m app.commands.discover_source
+# Read-only, secret-safe contract inspection (requires SAFETYDATA_SERVICE_KEY
+# in .env). Run before any live-source change; never guesses the contract.
+python -m app.commands.inspect_mois_api
+python -m app.commands.inspect_safekorea_fallback
 
-# First run only: store current records as a non-notifying baseline.
+# Explicit, idempotent source cutover: registers the currently-visible
+# MOIS/SafeKorea window as a known baseline so migrating an existing
+# database never resends historical messages. Required once before the
+# Poller will deliver on a pre-existing (non-empty) database.
+python -m app.commands.source_cutover_mois --inspect
+python -m app.commands.source_cutover_mois --bootstrap
+
+# First run only (fresh database): store current records as a non-notifying baseline.
 python -m app.commands.establish_baseline
 
 # One poll cycle: --dry-run previews only; --send stores + delivers via the
@@ -61,8 +78,9 @@ python -m app.commands.poll_once --send
 # default 300s) + one unified Telegram bot process, together, until Ctrl+C.
 python -m app.commands.run_local
 
-# Offline routing validation (no network)
+# Offline routing / source-pipeline validation (no network)
 python -m app.commands.validate_telegram_behavior
+python -m app.commands.validate_source_pipeline
 
 # Template workbook sync
 python -m app.commands.sync_templates_from_excel --check
@@ -72,11 +90,12 @@ python -m app.commands.sync_templates_from_excel --write
 python -m app.commands.run_poller
 python -m app.commands.run_telegram_bot
 
-# Local-only admin control of the SHARED SafeCity collector (v0.4.1). This is
-# the only explicit shared-poller control; it is NOT a Telegram command and is
-# not exposed via /help. `pause` here stops collection for everyone (not a
-# personal mute). Useful to re-enable a collector left paused by a legacy
-# pre-v0.4.0 Telegram /pause after migrating an older database.
+# Local-only admin control of the SHARED collector (MOIS API / SafeKorea
+# fallback since v0.5.0). This is the only explicit shared-poller control; it
+# is NOT a Telegram command and is not exposed via /help. `pause` here stops
+# collection for everyone (not a personal mute). Useful to re-enable a
+# collector left paused by a legacy pre-v0.4.0 Telegram /pause after
+# migrating an older database, or to pause before a source cutover.
 python -m app.commands.poller_control status
 python -m app.commands.poller_control resume
 python -m app.commands.poller_control pause
@@ -92,7 +111,7 @@ python -m app.commands.send_telegram_test --confirm
 
 See `docs/local_runtime.md` for the poller/bot process model, personal
 mute/subscribe (`/pause` and `/resume` are personal `/mute`/`/unmute`
-aliases), and SQLite concurrency details. The shared SafeCity collector is
+aliases), and SQLite concurrency details. The shared collector is
 controlled only by the local `poller_control` command above — Telegram
 commands never start/stop collection for other operators, and `/status` never
 exposes who paused the shared collector (v0.4.1). Automatic retry deliveries
@@ -159,9 +178,10 @@ python -m app.commands.export_history_sample --count 100 --output data/exports/h
 python -m pytest
 ```
 
-Tests run entirely against local fixtures/mocks — no live Telegram,
-OpenAI, or Seoul SafeCity network calls. A single controlled live fetch/
-send was run separately and is recorded in `docs/part1_completion_report.md`.
+Tests run entirely against local fixtures/mocks — no live Telegram, OpenAI,
+SafetyData, 국민안전24, or (retired) Seoul SafeCity network calls. A single
+controlled live fetch/send was run separately and is recorded in
+`docs/part1_completion_report.md`.
 
 ## Data model
 
@@ -197,7 +217,7 @@ either.
 ## Project layout
 
 ```
-app/            config, models, collector, parser, database, telegram_sender, poller, telegram_bot, process_lock
+app/            config, models, collector, mois_api, safekorea_fallback, database, telegram_sender, poller, telegram_bot, process_lock
 app/commands/   CLI entry points
 app/future/     inactive placeholders for later work (never imported by the live runtime)
 app/history_*.py  historical backfill collector (separate dataset, see docs/history_*.md)

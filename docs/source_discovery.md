@@ -1,5 +1,19 @@
 # Source Discovery — Seoul SafeCity 재난문자 widget
 
+> **RETIRED — 역사적 source-discovery 기록만 남긴다. v0.5.0 runtime에서 사용하지
+> 않는다.**
+>
+> Seoul SafeCity(`safecity.seoul.go.kr`)의 재난문자 widget은 개편으로 더 이상
+> 신뢰할 수 없는 source가 되어, v0.5.0부터 행정안전부 SafetyData Open API
+> (`DSSP-IF-00247`, `app/mois_api.py`)를 primary로, 국민안전24 HTML
+> (`app/safekorea_fallback.py`)을 조건부 fallback으로 완전히 대체했다.
+> `app/collector.py`는 더 이상 이 문서의 `JSESSIONID`/XHR 방식을 호출하지
+> 않는다. 최신 계약은 다음을 참고한다.
+>
+> - `docs/live_source_migration_mois_api_plan.md`
+> - `docs/mois_api_contract_confirmed.md`
+> - `docs/safekorea_html_fallback_plan.md`
+
 Investigation date: 2026-07-13 (KST). All findings below were verified against
 the live site with real HTTP requests (`curl`), not assumed.
 

@@ -2,7 +2,7 @@
 
 Current version: see `pyproject.toml` / `app/version.py` (also shown in the
 Telegram bot's startup log and `/status` reply) — see `docs/versioning.md`
-for the release process. As of this writing: **0.4.1**.
+for the release process. As of this writing: **0.5.0**.
 
 Service v1 integrates the recurring local poller and Telegram command bot
 (previously a separate branch) with the deterministic template engine
@@ -11,7 +11,7 @@ core product decision: **a human always picks the template.** The system
 never auto-selects, auto-renders-and-sends, or auto-confirms anything.
 
 > **v0.4.0 — independent operators.** Every authorized operator is an equal,
-> independent entity operating in their own **private** chat. The SafeCity
+> independent entity operating in their own **private** chat. The shared
 > collector and `messages` DB stay shared, but delivery, commands, previews,
 > decisions, AI, and mute/subscribe state are fully personal. Automatic alerts
 > fan out to every active personal subscription (`telegram_deliveries`), not to
@@ -24,17 +24,30 @@ never auto-selects, auto-renders-and-sends, or auto-confirms anything.
 > unchanged): automatic **retry** deliveries are filtered by the current
 > `TELEGRAM_ALLOWED_USER_IDS` (a user removed from the allow-list is never
 > retried; their historical row is kept for audit), and `/status` no longer
-> exposes the identity that paused the shared collector. The shared SafeCity
+> exposes the identity that paused the shared collector. The shared
 > collector is now controlled only by the local `python -m
 > app.commands.poller_control` command (`status` / `resume` / `pause`) — not a
 > Telegram command and not in `/help`. Telegram `/pause` and `/resume` remain
 > personal mute/unmute.
+>
+> **v0.5.0 — live source migration.** The retired Seoul SafeCity
+> `JSESSIONID`/XHR collector is replaced by the official 행정안전부(MOIS)
+> SafetyData Open API (`DSSP-IF-00247`) as the primary live source, with a
+> conditional 국민안전24 HTML fallback used only within the same poll cycle
+> after a primary hard runtime failure. The flow below (poll → store → 8
+> equal-weight buttons → preview → confirm/cancel/AI) is completely
+> unchanged — only the source producing the normalized `DisasterMessageRecord`
+> changed. See `docs/live_source_migration_mois_api_plan.md`,
+> `docs/mois_api_contract_confirmed.md`, `docs/safekorea_html_fallback_plan.md`,
+> and `docs/source_cutover_runbook.md`.
 
 ## The flow
 
 ```
-1. Poller collects a genuinely new Seoul SafeCity message (every
-   POLL_INTERVAL_SECONDS, default 300s).
+1. Poller collects a genuinely new Seoul-targeted disaster-message record
+   (MOIS API, or the SafeKorea HTML fallback on a primary hard failure —
+   see `docs/live_source_migration_mois_api_plan.md`) every
+   POLL_INTERVAL_SECONDS, default 300s.
 2. The message is stored, then sent to Telegram as-is, with 8 equal-weight
    buttons: the 7 templates + "📄 원문". A small secondary line may show
    "실험적 추천: ..." (the deterministic rule engine's own guess) but it is
@@ -65,7 +78,7 @@ one to the other:
 
 | | Automatic personal delivery | Interactive reply |
 |---|---|---|
-| When | Poller detects a genuinely new SafeCity message (`app.commands.poll_once`) | `/latest`, `/history`, ordinary text, `/status`, `/subscribe`, `/unsubscribe`, `/mute`, `/unmute` (`/pause`/`/resume` aliases), `/help`, any callback (history, category, template, preview confirm/cancel/AI) |
+| When | Poller detects a genuinely new disaster-message record (`app.commands.poll_once`) | `/latest`, `/history`, ordinary text, `/status`, `/subscribe`, `/unsubscribe`, `/mute`, `/unmute` (`/pause`/`/resume` aliases), `/help`, any callback (history, category, template, preview confirm/cancel/AI) |
 | Target chat | Every **active personal subscription** — fans out one `telegram_deliveries` row per operator's private chat (v0.4.0). Not `TELEGRAM_CHAT_ID`, which is legacy bootstrap only | The chat_id the inbound message/callback actually came from — `message.chat.id` or `callback_query.message.chat.id` |
 | `TELEGRAM_SEND_ENABLED` | Honored — the global master switch gates all automatic delivery | Never honored — a direct reply to something an operator just did must never be silently dropped |
 | Persists `template_suggestions`? | Yes, once per message (not once per recipient) | No (a `/latest` replay never adds a second row) |
@@ -116,7 +129,7 @@ predating this fix).
 ### Diagnosing repeated/misrouted responses
 
 If `TELEGRAM_CHAT_ID` appears to receive a reply that wasn't a genuine new
-SafeCity message, or an operator reports getting no reply to `/latest`,
+disaster-message alert, or an operator reports getting no reply to `/latest`,
 check the bot's INFO-level attribution logs (`app/telegram_bot.py::dispatch`,
 `app/template_flow.py::dispatch_callback`): each inbound update logs
 `update_id`, `user_id`, `chat_id`, `command`/`action`, `routed_chat_id`, and

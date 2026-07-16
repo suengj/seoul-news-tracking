@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Iterator
 from zoneinfo import ZoneInfo
 
-from app.models import DisasterMessageRecord, TelegramStatus
+from app.models import DisasterMessageRecord, TelegramStatus, cross_source_equivalent_ids
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +279,11 @@ class SystemState:
     last_poll_error: str | None
     last_new_message_at: datetime | None
     last_cleanup_at: datetime | None
+    last_collection_source: str | None = None
+    last_collection_source_at: datetime | None = None
+    last_primary_error_category: str | None = None
+    source_cutover_at: datetime | None = None
+    source_bootstrap_completed: bool = False
 
 
 @dataclass
@@ -390,6 +395,23 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE system_state ADD COLUMN telegram_update_offset INTEGER NOT NULL DEFAULT 0"
             )
+
+        # v0.5.0: source observability + cutover markers (see
+        # docs/live_source_migration_mois_api_plan.md §14, §19). Re-read
+        # state_columns since the ALTER above may have just changed it.
+        state_columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(system_state)").fetchall()
+        }
+        source_columns = {
+            "last_collection_source": "TEXT",
+            "last_collection_source_at": "TEXT",
+            "last_primary_error_category": "TEXT",
+            "source_cutover_at": "TEXT",
+            "source_bootstrap_completed": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column, column_type in source_columns.items():
+            if column not in state_columns:
+                self._conn.execute(f"ALTER TABLE system_state ADD COLUMN {column} {column_type}")
 
         # v0.4.0: nullable chat-attribution columns for independent auditability.
         action_columns = {
@@ -528,16 +550,55 @@ class Database:
         return {row["raw_hash"] for row in cur.fetchall()}
 
     def is_known(self, record: DisasterMessageRecord) -> bool:
+        """True if this record (or its cross-source equivalent) is already
+        stored or tombstoned.
+
+        v0.5.0: checks every namespaced source_id that could refer to the
+        same underlying message (e.g. both "MOIS:261088" and
+        "SAFEKOREA:261088"), not just the exact id on `record` — MOIS's `SN`
+        and SafeKorea's `bbsSn` were empirically confirmed to be the same
+        numeric id for the same message, so this is what prevents the same
+        disaster message from being sent twice when the source cuts over
+        between MOIS and the SafeKorea fallback. Unaffected for legacy
+        non-namespaced ids (cross_source_equivalent_ids returns the id
+        unchanged). Still checked against `messages` and `tombstones` via
+        the existing UNIQUE(source_id) index, so this stays a fast indexed
+        lookup regardless of table size.
+        """
+        equivalent_ids = cross_source_equivalent_ids(record.source_id)
+        placeholders = ",".join("?" for _ in equivalent_ids)
         cur = self._conn.execute(
-            """
-            SELECT 1 FROM messages WHERE source_id = ? OR raw_hash = ?
+            f"""
+            SELECT 1 FROM messages WHERE source_id IN ({placeholders}) OR raw_hash = ?
             UNION ALL
-            SELECT 1 FROM tombstones WHERE source_id = ? OR raw_hash = ?
+            SELECT 1 FROM tombstones WHERE source_id IN ({placeholders}) OR raw_hash = ?
             LIMIT 1
             """,
-            (record.source_id, record.raw_hash, record.source_id, record.raw_hash),
+            (*equivalent_ids, record.raw_hash, *equivalent_ids, record.raw_hash),
         )
         return cur.fetchone() is not None
+
+    def find_equivalent_recent_message(
+        self, record: DisasterMessageRecord, *, lookback_days: int = 8
+    ) -> DisasterMessageRecord | None:
+        """Bounded-window cross-source match, for `source_cutover_mois
+        --inspect` reporting and diagnostics — not the runtime dedup path
+        (`is_known` already covers that unconditionally). Looks only at the
+        last `lookback_days` by `sent_at`, so this never scans the full
+        historical table."""
+        cutoff = _iso(datetime.now(tz=SEOUL_TZ) - timedelta(days=lookback_days))
+        equivalent_ids = cross_source_equivalent_ids(record.source_id)
+        placeholders = ",".join("?" for _ in equivalent_ids)
+        cur = self._conn.execute(
+            f"""
+            SELECT * FROM messages
+            WHERE (source_id IN ({placeholders}) OR raw_hash = ?) AND sent_at >= ?
+            ORDER BY sent_at DESC LIMIT 1
+            """,
+            (*equivalent_ids, record.raw_hash, cutoff),
+        )
+        row = cur.fetchone()
+        return self._row_to_record(row) if row is not None else None
 
     def insert(self, record: DisasterMessageRecord, *, is_baseline: bool = False) -> int:
         """Insert a new record. Caller must have already checked is_known()."""
@@ -724,6 +785,38 @@ class Database:
             last_poll_error=row["last_poll_error"],
             last_new_message_at=_parse_dt(row["last_new_message_at"]),
             last_cleanup_at=_parse_dt(row["last_cleanup_at"]),
+            last_collection_source=row["last_collection_source"],
+            last_collection_source_at=_parse_dt(row["last_collection_source_at"]),
+            last_primary_error_category=row["last_primary_error_category"],
+            source_cutover_at=_parse_dt(row["source_cutover_at"]),
+            source_bootstrap_completed=bool(row["source_bootstrap_completed"]),
+        )
+
+    def record_collection_source(
+        self, *, method: str, primary_error_category: str | None, now: datetime | None = None
+    ) -> None:
+        """Record which source produced the most recent collection result
+        (v0.5.0 observability — see docs/live_source_migration_mois_api_plan.md
+        §14). Never store secrets or a request URL query string here."""
+        now = now or datetime.now(tz=SEOUL_TZ)
+        self._execute_write(
+            "UPDATE system_state SET last_collection_source = ?, last_collection_source_at = ?, "
+            "last_primary_error_category = ? WHERE id = 1",
+            (method, _iso(now), primary_error_category),
+        )
+
+    def is_source_bootstrap_completed(self) -> bool:
+        cur = self._conn.execute("SELECT source_bootstrap_completed FROM system_state WHERE id = 1")
+        return bool(cur.fetchone()["source_bootstrap_completed"])
+
+    def mark_source_bootstrap_completed(self, *, now: datetime | None = None) -> None:
+        """Idempotent: safe to call again on a rerun of `source_cutover_mois
+        --bootstrap` (source_cutover_at is refreshed but bootstrap stays
+        completed either way)."""
+        now = now or datetime.now(tz=SEOUL_TZ)
+        self._execute_write(
+            "UPDATE system_state SET source_cutover_at = ?, source_bootstrap_completed = 1 WHERE id = 1",
+            (_iso(now),),
         )
 
     def is_polling_enabled(self) -> bool:

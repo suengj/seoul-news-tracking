@@ -10,7 +10,8 @@ from app.future import approval_workflow, message_formatter, scheduler, trigger_
 APP_DIR = Path(__file__).parent.parent / "app"
 RUNTIME_MODULES = [
     APP_DIR / "collector.py",
-    APP_DIR / "parser.py",
+    APP_DIR / "mois_api.py",
+    APP_DIR / "safekorea_fallback.py",
     APP_DIR / "database.py",
     APP_DIR / "telegram_sender.py",
     APP_DIR / "config.py",

@@ -17,8 +17,13 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-SOURCE_PAGE_URL = "https://safecity.seoul.go.kr/news/dist/dust/newsDistDustList.page"
-SOURCE_API_URL = "https://safecity.seoul.go.kr/disstr/selectDisstrSms.do"
+# v0.5.0: live source is the MOIS SafetyData Open API, with a conditional
+# 국민안전24 HTML fallback. The old Seoul SafeCity SOURCE_PAGE_URL/SOURCE_API_URL
+# runtime constants are retired — see docs/source_discovery.md.
+SAFETYDATA_API_URL = "https://www.safetydata.go.kr/V2/api/DSSP-IF-00247"
+SAFETYDATA_DATASET_PAGE_URL = "https://www.safetydata.go.kr/disaster-data/view?dataSn=228"
+SAFEKOREA_BASE_URL = "https://www.safekorea.go.kr/safekorea-kor/ctim/cmsg/calamitySms.do"
+SAFEKOREA_SEOUL_LAW_AREA = "1100000000"
 
 HISTORY_LIST_URL = "https://www.safetydata.go.kr/disaster-data/disasterNotification"
 HISTORY_DETAIL_URL = "https://www.safetydata.go.kr/disaster-data/disasterNotificationDetail"
@@ -38,6 +43,10 @@ RUN_HISTORY_RETENTION_DAYS_RANGE = (1, 365)
 CLEANUP_INTERVAL_HOURS_RANGE = (1, 168)
 TOMBSTONE_RETENTION_DAYS_RANGE = (1, 3650)
 TELEGRAM_AI_WORKERS_RANGE = (1, 4)
+SAFETYDATA_NUM_OF_ROWS_RANGE = (1, 1000)
+SAFETYDATA_LOOKBACK_DAYS_RANGE = (1, 7)
+SAFEKOREA_MAX_PAGES_RANGE = (1, 50)
+SAFEKOREA_REQUEST_DELAY_SECONDS_RANGE = (0.0, 5.0)
 
 
 class ConfigError(ValueError):
@@ -64,6 +73,17 @@ def _parse_int_in_range(name: str, raw: str, bounds: tuple[int, int]) -> int:
         value = int(raw)
     except ValueError as exc:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
+    if not (low <= value <= high):
+        raise ConfigError(f"{name} must be between {low} and {high}, got {value}")
+    return value
+
+
+def _parse_float_in_range(name: str, raw: str, bounds: tuple[float, float]) -> float:
+    low, high = bounds
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a number, got {raw!r}") from exc
     if not (low <= value <= high):
         raise ConfigError(f"{name} must be between {low} and {high}, got {value}")
     return value
@@ -109,6 +129,16 @@ class Settings:
     # Bounded thread pool for on-demand AI generation so one operator's AI
     # call never blocks another operator's non-AI commands (v0.4.0).
     telegram_ai_workers: int = 2
+
+    # v0.5.0 live source: MOIS SafetyData API (primary) + 국민안전24 HTML
+    # (conditional fallback). See docs/live_source_migration_mois_api_plan.md.
+    safetydata_service_key: str = ""
+    safetydata_num_of_rows: int = 100
+    safetydata_lookback_days: int = 1
+    safekorea_fallback_enabled: bool = True
+    safekorea_request_timeout_seconds: float = 15.0
+    safekorea_max_pages: int = 10
+    safekorea_request_delay_seconds: float = 0.3
 
     @property
     def telegram_configured(self) -> bool:
@@ -218,5 +248,34 @@ def load_settings(env_file: Path | None = None) -> Settings:
             "TELEGRAM_AI_WORKERS",
             os.environ.get("TELEGRAM_AI_WORKERS", "2"),
             TELEGRAM_AI_WORKERS_RANGE,
+        ),
+        safetydata_service_key=os.environ.get("SAFETYDATA_SERVICE_KEY", ""),
+        safetydata_num_of_rows=_parse_int_in_range(
+            "SAFETYDATA_NUM_OF_ROWS",
+            os.environ.get("SAFETYDATA_NUM_OF_ROWS", "100"),
+            SAFETYDATA_NUM_OF_ROWS_RANGE,
+        ),
+        safetydata_lookback_days=_parse_int_in_range(
+            "SAFETYDATA_LOOKBACK_DAYS",
+            os.environ.get("SAFETYDATA_LOOKBACK_DAYS", "1"),
+            SAFETYDATA_LOOKBACK_DAYS_RANGE,
+        ),
+        safekorea_fallback_enabled=_parse_bool(
+            os.environ.get("SAFEKOREA_FALLBACK_ENABLED", "true")
+        ),
+        safekorea_request_timeout_seconds=_parse_float_in_range(
+            "SAFEKOREA_REQUEST_TIMEOUT_SECONDS",
+            os.environ.get("SAFEKOREA_REQUEST_TIMEOUT_SECONDS", "15"),
+            (1.0, 120.0),
+        ),
+        safekorea_max_pages=_parse_int_in_range(
+            "SAFEKOREA_MAX_PAGES",
+            os.environ.get("SAFEKOREA_MAX_PAGES", "10"),
+            SAFEKOREA_MAX_PAGES_RANGE,
+        ),
+        safekorea_request_delay_seconds=_parse_float_in_range(
+            "SAFEKOREA_REQUEST_DELAY_SECONDS",
+            os.environ.get("SAFEKOREA_REQUEST_DELAY_SECONDS", "0.3"),
+            SAFEKOREA_REQUEST_DELAY_SECONDS_RANGE,
         ),
     )

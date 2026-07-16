@@ -28,6 +28,18 @@ identity (`paused_by`) from the user-facing `/status`, and (3) adds a
 local-only `poller_control` command to inspect/resume/pause the shared
 collector. The v0.4.0 independent-operator architecture is unchanged.
 
+`0.5.0` (live source migration) is a **MINOR** release: the retired Seoul
+SafeCity `JSESSIONID`/XHR collector is replaced by the MOIS SafetyData API
+(primary) with a conditional SafeKorea HTML fallback. New, purely additive
+`system_state` columns (`last_collection_source`, `last_collection_source_at`,
+`last_primary_error_category`, `source_cutover_at`,
+`source_bootstrap_completed`); new settings with safe defaults
+(`SAFETYDATA_*`, `SAFEKOREA_*`); existing commands, Telegram contract,
+templates, and the historical database are unchanged. Requires running
+`python -m app.commands.source_cutover_mois --bootstrap` once on any existing
+(non-empty) database before the Poller will deliver — see
+`docs/source_cutover_runbook.md`.
+
 ## Release steps
 
 Same as before. For 0.4.0 / 0.4.1 specifically: run
@@ -40,6 +52,15 @@ status` (resume only if a legacy pause left it disabled), restart on merged
 main, perform the two-operator private-chat check in
 `docs/telegram_routing_validation.md`, then tag (`v0.4.0` / `v0.4.1`) only
 after live validation succeeds.
+
+For `0.5.0`: additionally run `python -m app.commands.inspect_mois_api`,
+`python -m app.commands.inspect_safekorea_fallback`, and
+`python -m app.commands.validate_source_pipeline`; validate cutover on a
+**copy** of the production DB with `source_cutover_mois --inspect` /
+`--bootstrap` before ever running bootstrap against the real file; confirm
+the first post-cutover poll causes no historical send burst; then tag
+`v0.5.0` only after live validation succeeds — see
+`docs/source_cutover_runbook.md`.
 
 1. Update/add tests for the change.
 2. Update `CHANGELOG.md` (`[Unreleased]` -> a new dated version section).

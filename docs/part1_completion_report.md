@@ -1,5 +1,13 @@
 # Part 1 Completion Report
 
+> **Historical record — the Seoul SafeCity source described below was
+> retired in v0.5.0.** Live collection now uses the 행정안전부(MOIS)
+> SafetyData API with a 국민안전24 HTML fallback; see
+> `docs/live_source_migration_mois_api_plan.md`,
+> `docs/mois_api_contract_confirmed.md`, and `docs/source_cutover_runbook.md`
+> for the current source. This report is preserved unmodified as a record of
+> what was actually verified for the original Part 1 source.
+
 All items below were actually executed in this environment on 2026-07-13
 (KST) against the live Seoul SafeCity site and a real Telegram bot — not
 simulated.

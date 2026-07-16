@@ -5,6 +5,103 @@
 - 안내 페이지: `https://www.safetydata.go.kr/disaster-data/view?dataSn=228`
 - API base: `https://www.safetydata.go.kr/V2/api/DSSP-IF-00247`
 - 관련 전환 계획: `docs/live_source_migration_mois_api_plan.md`
+- 상태: **실제 서비스키로 라이브 검증 완료** (`python -m app.commands.inspect_mois_api`)
+
+## 0. 라이브 검증 결과 요약 (v0.5.0 확정 계약)
+
+이하 섹션의 "미확인" 항목은 모두 실제 키로 확인 완료됐다. 확정된 최종 계약:
+
+### JSON envelope (성공)
+
+```json
+{
+  "header": {"resultCode": "00", "resultMsg": "NORMAL SERVICE", "errorMsg": null},
+  "numOfRows": 20,
+  "pageNo": 1,
+  "totalCount": 9,
+  "body": [ { "SN": 261088, "CRT_DT": "2026/07/14 17:13:08", "MSG_CN": "...",
+              "RCPTN_RGN_NM": "서울특별시 강남구 ", "EMRG_STEP_NM": "안전안내",
+              "DST_SE_NM": "강풍", "REG_YMD": "2026/07/14 17:13:30.000000000",
+              "MDFCN_YMD": "2026/07/14 17:23:20.000000000" }, ... ]
+}
+```
+
+- `totalCount == 0` 이면 `body` 는 `null` (빈 배열이 아님) — valid empty.
+- `body` 는 `body.items.item` 같은 중첩 구조가 아니라 **최상위에서 바로 배열**.
+
+### JSON envelope (실패, 예: 미등록 서비스키)
+
+```json
+{
+  "header": {"resultCode": "30", "resultMsg": "SERVICE KEY IS NOT REGISTERED ERROR",
+             "errorMsg": "등록되지 않은 서비스키"},
+  "body": null
+}
+```
+
+- 실패 시 HTTP status는 여전히 **200**이다. `numOfRows`/`pageNo`/`totalCount` 최상위 키가
+  아예 없을 수 있으므로, 먼저 `header.resultCode`를 확인한 뒤에만 나머지 필드에 접근한다.
+- 성공 코드는 `resultCode == "00"`. 그 외 모든 코드는 API-level failure로 분류하고
+  fallback 대상(runtime hard failure)으로 취급한다.
+
+### 필드 형식 확정
+
+| 필드 | 확정 형식 | 비고 |
+|---|---|---|
+| `SN` | `int` | `source_id = f"MOIS:{SN}"` |
+| `CRT_DT` | `"YYYY/MM/DD HH:MM:SS"` (슬래시, 초 단위) | 예: `2026/07/14 17:13:08` |
+| `REG_YMD` / `MDFCN_YMD` | 형식 불일치 확인됨 — 일부는 `"YYYY/MM/DD HH:MM:SS.nnnnnnnnn"`, 오래된 레코드는 `"YYYY-MM-DD"` | `sent_at`으로 사용하지 않으므로 raw_payload에만 원문 보존, 파싱하지 않음 |
+| `RCPTN_RGN_NM` | `str` (배열 아님) | 다중 지역은 콤마로 구분, **콤마 뒤 공백 없음**, 각 token 내부에 `"서울특별시 구로구 "`처럼 **trailing space 포함** — 정규화 시 반드시 각 token을 `strip()` |
+| `MSG_CN` | `str` | 원문 그대로 보존 |
+
+### `crtDt` 파라미터의 실제 의미 — 중요
+
+`crtDt`는 "해당 날짜 하루만" 필터하지 않는다. **`crtDt` 이상(그 날짜부터 지금까지 누적)**으로
+동작하는 inclusive lower-bound다. 실증:
+
+```text
+crtDt=20260716 (오늘)   rgnNm=서울특별시 -> totalCount=0
+crtDt=20260714 (2일 전) rgnNm=서울특별시 -> totalCount=9
+crtDt=20260710          rgnNm=서울특별시 -> totalCount=41
+crtDt=20260701          rgnNm=서울특별시 -> totalCount=59
+crtDt=20260610          rgnNm=서울특별시 -> totalCount=86
+```
+
+**`crtDt`를 생략하면 전체 이력 데이터셋이 반환된다** (실측 `totalCount=54682`,
+2023년 데이터까지 포함). 따라서 프로덕션 코드는 `crtDt`를 **절대 생략하지 않는다.**
+
+`crtDt`가 파싱 불가능한 문자열이어도 API는 오류를 내지 않고 `totalCount=0`을 반환한다
+(`resultCode=00`). 즉 API 쪽에서 형식 오류를 알려주지 않으므로, `crtDt` 문자열은
+호출 전에 우리 쪽에서 항상 `YYYYMMDD`로 올바르게 생성해야 한다.
+
+### 정렬
+
+Page 1 실측 결과 `SN`/`CRT_DT` 기준 오름차순도 내림차순도 아닌 **비결정적(unspecified) 순서**로
+확인됐다. → **프로덕션은 반드시 반환된 레코드를 `sent_at` 기준으로 직접 정렬한다.**
+
+### `rgnNm=서울특별시` 서버 필터 완전성 — 확정
+
+동일 window(`crtDt=20260714`, 2일치, 무필터 총 308건)에서 비교:
+
+- 무필터 결과 중 `RCPTN_RGN_NM`에 서울특별시 token이 포함된 레코드: **9건** (그중 다중지역 2건)
+- `rgnNm=서울특별시` 필터 결과: **9건**
+- 서울 포함인데 필터에서 누락된 건: **0건**
+
+**결정: `rgnNm=서울특별시`는 다중지역 서울 레코드를 누락하지 않는다.** 프로덕션은
+`rgnNm=서울특별시`를 서버측 최적화로 사용하고, 반환된 각 레코드에 대해
+`RCPTN_RGN_NM` client-side 검증을 그대로 병행한다 (섹션 3의 이중 필터 원칙 유지).
+
+### `numOfRows` 상한
+
+`numOfRows=1000` 요청이 정상 처리되고 실제로 1000건이 반환됨을 확인. 프로덕션은
+`SAFETYDATA_NUM_OF_ROWS` (기본 100, 허용 범위 1–1000)를 사용한다. 그 이상 상한은
+불필요한 대량요청을 피하기 위해 테스트하지 않았다.
+
+### Service key 인코딩
+
+로컬 키는 `httpx`의 표준 `params=` dict(자동 URL-encode)로 전달했을 때 그대로
+`resultCode=00`으로 성공했다 — 별도 encode/decode 처리가 필요하지 않다.
+프로덕션은 `httpx.Client.get(url, params={"serviceKey": key, ...})` 방식 하나만 사용한다.
 
 ## 1. 확정된 요청 파라미터
 

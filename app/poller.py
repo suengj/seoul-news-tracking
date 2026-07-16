@@ -100,7 +100,7 @@ class Poller:
             enabled = db.is_polling_enabled()
 
         if not enabled:
-            logger.info("polling is paused; skipping Seoul SafeCity request this cycle")
+            logger.info("polling is paused; skipping collection request this cycle")
             return
 
         return_code = run_poll_cycle(self.settings, send=True, notify_existing=False)

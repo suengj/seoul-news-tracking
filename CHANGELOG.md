@@ -2,6 +2,102 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-16
+
+Live-source migration: the retired Seoul SafeCity `JSESSIONID`/XHR collector
+is replaced by the official 행정안전부(MOIS) SafetyData Open API
+(`DSSP-IF-00247`) as the primary source, with a conditional 국민안전24 HTML
+fallback used only within the same poll cycle after a primary hard runtime
+failure. The v0.4.x independent-operator architecture, template/AI/Preview
+flow, 300-second polling, and existing historical database are unchanged —
+only the live data-source layer, source observability, source cutover, and
+cross-source deduplication changed. See
+`docs/live_source_migration_mois_api_plan.md`,
+`docs/mois_api_contract_confirmed.md`, and
+`docs/safekorea_html_fallback_plan.md` for the full confirmed contract.
+
+### Added
+- `app/mois_api.py`: MOIS SafetyData API request, pagination, retry/backoff,
+  envelope/schema validation, and Seoul recipient filtering via the
+  authoritative `RCPTN_RGN_NM` field (`is_seoul_recipient()` in
+  `app/models.py`).
+- `app/safekorea_fallback.py`: 국민안전24 서울 필터 HTML list collector
+  (`sbLawArea1=1100000000`) — server-rendered, no browser automation; the
+  full body/발송일시/긴급단계/송출지역 are already present in the list HTML, so
+  no detail-page fetch is needed.
+- `app/commands/inspect_mois_api.py` and
+  `app/commands/inspect_safekorea_fallback.py`: read-only, secret-safe
+  contract inspection commands used to empirically confirm both sources
+  before implementation (never guessed).
+- `app/commands/source_cutover_mois.py --inspect` / `--bootstrap`: explicit,
+  idempotent source cutover — registers the currently-visible MOIS/SafeKorea
+  window as a known baseline (no Telegram sends, no template classification)
+  so migrating an existing database never causes a historical send burst.
+  The Poller refuses live automatic delivery on a pre-existing (non-empty)
+  database until bootstrap completes.
+- `app/commands/validate_source_pipeline.py`: offline (no-network) validator
+  covering MOIS parsing, Seoul filtering, valid-empty handling, the
+  SafeKorea fallback, cross-source dedup, cutover safety, independent
+  two-user fan-out, and legacy-source exclusion.
+- Cross-source duplicate protection: `cross_source_equivalent_ids()` /
+  `strip_source_namespace()` in `app/models.py`, used by
+  `Database.is_known()` and the new `Database.find_equivalent_recent_message()`
+  — MOIS's `SN` and SafeKorea's `bbsSn` were empirically confirmed to be the
+  same numeric id for the same message, so cross-source dedup is exact-ID-based
+  rather than fuzzy text matching.
+- Source observability: `system_state.last_collection_source`,
+  `last_collection_source_at`, `last_primary_error_category`,
+  `source_cutover_at`, `source_bootstrap_completed`; shown in the shared
+  `/status` section as `최근 수집 원천` / `Primary 최근 오류` (no secrets, no
+  request URLs, no message bodies).
+- `SAFETYDATA_SERVICE_KEY`, `SAFETYDATA_NUM_OF_ROWS`,
+  `SAFETYDATA_LOOKBACK_DAYS`, `SAFEKOREA_FALLBACK_ENABLED`,
+  `SAFEKOREA_REQUEST_TIMEOUT_SECONDS`, `SAFEKOREA_MAX_PAGES`,
+  `SAFEKOREA_REQUEST_DELAY_SECONDS` settings.
+
+### Changed
+- Live disaster-message source moved from Seoul SafeCity to the MOIS API
+  (with the SafeKorea HTML fallback). Existing Telegram delivery, template,
+  and AI flow now consume normalized MOIS/SafeKorea records exactly as they
+  did SafeCity records — no source-specific fields leak into template logic.
+- A valid empty API/fallback result (zero records, or zero Seoul records
+  after `RCPTN_RGN_NM` filtering) is now a successful no-op `CollectionResult`,
+  not an exception — `poll_once`/`poller` no longer treat it as a failed run.
+
+### Fixed
+- `app/safekorea_fallback.py`: a body containing `<br>` tags was silently
+  concatenated with no separator at all (`get_text(strip=True)` strips each
+  text fragment individually, discarding a manually-inserted newline before
+  joining) — now uses `get_text("\n", strip=True)` directly.
+- `app/commands/poll_once.py`: the v0.5.0 source-cutover safety gate only
+  applied to `--send` runs, but a plain `poll_once` (no `--send`) still
+  inserted `new_records` unconditionally on a pre-existing, not-yet-
+  bootstrapped database — permanently marking the current cutover window as
+  "already known" and silently losing those records from ever being
+  delivered, even after a later `--bootstrap`/`--send`. The gate now applies
+  to any real (non-`--dry-run`) collection cycle.
+- `app/commands/poll_once.py` / `app/collector.py`: a full-outage cycle
+  (both MOIS and SafeKorea fail) never updated
+  `system_state.last_primary_error_category`, leaving `/status` reporting a
+  stale category from an earlier, unrelated degraded-but-successful cycle.
+  `CollectorError` now carries `primary_error_category` so the failure path
+  can record it (`최근 수집 원천` shows `수집 실패 (원천 없음)` for this case).
+- `app/commands/establish_baseline.py`: the fresh-database baseline run
+  never called `db.mark_source_bootstrap_completed()`, so `poll_once`'s
+  cutover gate would keep demanding an explicit `source_cutover_mois
+  --bootstrap` run afterward even though the baseline run already did the
+  equivalent (insert-only, nothing sent) work.
+- `app/commands/poll_once.py` / `app/commands/establish_baseline.py`: both
+  called `fetch_records()` without passing the already-loaded `settings`,
+  causing a redundant, avoidable second `load_settings()` call.
+
+### Removed
+- Runtime Seoul SafeCity `JSESSIONID`/XHR collector (`app/parser.py`,
+  `app/commands/discover_source.py`, `SOURCE_PAGE_URL`/`SOURCE_API_URL`,
+  `_bootstrap_session`, `X-Requested-With`, `/disstr/selectDisstrSms.do`).
+  `docs/source_discovery.md` is retained only as a marked-RETIRED historical
+  record.
+
 ## [0.4.1] - 2026-07-15
 
 Compact production hotfix for two narrow v0.4.0 defects, plus an explicit

@@ -6,6 +6,88 @@
 - 목표 버전: v0.5.0
 - Primary source: 행정안전부 SafetyData Open API `DSSP-IF-00247`
 - Fallback source: 국민안전24 재난문자 조회 페이지
+- 상태: **라이브 검증 완료** (`python -m app.commands.inspect_safekorea_fallback`)
+
+## 0. 라이브 검증 결과 요약 (v0.5.0 확정 계약)
+
+### HTML 구조 — 서버렌더링, JS 불필요
+
+- `GET https://www.safekorea.go.kr/safekorea-kor/ctim/cmsg/calamitySms.do`는 순수 서버렌더링
+  HTML을 반환한다 (redirect 0회, content-type `text/html`). JavaScript 실행이나 브라우저 자동화가
+  전혀 필요 없다 — `httpx` GET + `BeautifulSoup`만으로 충분.
+- 목록 row selector: `div.board-list table tbody tr` (데스크톱 테이블). 같은 데이터가
+  `div.brd-listarea`(모바일용, CSS `display:none` 기본)에도 중복 렌더링되므로 반드시
+  데스크톱 selector만 사용하고 모바일 블록은 무시한다.
+- 페이지당 10행 고정. 총 건수는 `div.board-count` 텍스트(`전체51건` 형식)에서 파싱 가능.
+- Pagination은 `div.pagination button`(`fnPageSubmit(N)`)이지만 실제로는 단순 GET
+  querystring `currentPage=N`으로 각 페이지를 직접 요청할 수 있음을 확인(폼 재제출 불필요).
+- 빈 결과 표현: `tbody`에 행이 정확히 1개, 텍스트가 `"데이터가 존재하지 않습니다."`이고
+  `board-count`가 `전체0건`.
+
+### 목록 HTML에 전체 데이터가 이미 존재 — 상세 페이지 불필요
+
+각 `<tr>`는 다음을 이미 포함한다:
+
+```html
+<tr>
+  <td>홍수</td>  <!-- 재해구분 -->
+  <td class="tit">
+    <a href="javascript:onSubmit('261132');">[전체 본문 텍스트, 요약/절단 없음]</a>
+    <p> ㆍ&nbsp;발송일시 : 2026/07/14 22:47:07 ㆍ&nbsp;긴급단계 : 안전안내
+        ㆍ&nbsp;송출지역 : 경기도 광명시, 경기도 시흥시, 서울특별시 구로구 </p>
+  </td>
+</tr>
+```
+
+10개 row 전수 검사 결과 본문/발송일시/송출지역/bbsSn 누락 0건. **결론: 상세 페이지 요청은
+정상 운영에서 불필요하다.** (섹션 15 원안의 detail fetch 로직은 실제로는 사용되지 않음 —
+필요 시를 대비해 상세 페이지 존재 자체는 확인하지 않았으므로, 목록에 없는 필드가 향후
+발견되면 재검토.)
+
+### `bbsSn` — 안정적이며 SafetyData API의 `SN`과 동일한 값
+
+`href="javascript:onSubmit('261132');"`에서 추출한 `bbsSn`은 **SafetyData API의 `SN`과 정확히
+동일한 값**임을 확인했다 (같은 날짜 window에서 MOIS `SN` 9건과 SafeKorea `bbsSn` 9건이
+정확히 일치). 두 시스템이 동일한 상위 재난문자 DB를 공유하기 때문으로 보인다. →
+**cross-source dedup은 canonical fingerprint 없이 숫자 ID 동일성만으로 결정적으로 해결된다**
+(섹션 9 참고).
+
+### 필드 값 비교 — sent_at/region 완전 일치, body는 접두 조직명 차이
+
+동일 `SN`/`bbsSn`(261088)에 대해:
+
+| 필드 | MOIS | SafeKorea | 일치 |
+|---|---|---|---|
+| 발송시각 | `2026/07/14 17:13:08` | `2026/07/14 17:13:08` | 완전 일치 |
+| 송출지역 | `서울특별시 노원구 ` | `서울특별시 노원구` | 공백 외 일치(trim 필요) |
+| 본문 | `오늘 밤 노원구에...[노원구]` | `[노원구] 오늘 밤 노원구에...[노원구]` | **SafeKorea가 발신기관명 `[노원구]`를 본문 앞에 추가로 표시** |
+
+→ `raw_hash(sender_or_region, sent_at, original_body)`는 이 접두어 차이 때문에 두 source
+간 **일치하지 않는다.** 본문에서 임의로 단어를 제거하는 것은 금지되어 있으므로(섹션 9),
+canonical fingerprint로 이 차이를 흡수하는 대신 — 이미 확인된 **숫자 ID 동일성**을
+cross-source dedup의 결정적 근거로 사용한다.
+
+### 서울 필터(`sbLawArea1=1100000000`) 복수지역 포함 여부 — 확정
+
+전국 무필터 목록은 7일 기준 1,227건으로 전수 비교가 비현실적이므로, 필터링된 결과셋
+자체의 내적 일관성으로 검증했다: 필터가 복수지역 레코드를 제외한다면 필터 결과에
+콤마 포함 레코드가 존재할 수 없다.
+
+- Seoul 필터 결과: 51건
+- 그중 복수지역(콤마 포함) 레코드: **14건**, 예:
+  - `경기도 광명시, 경기도 시흥시, 서울특별시 구로구` (SN 261132, MOIS와 교차검증 완료)
+  - `경기도, 서울특별시, 인천광역시` (SN 261101, MOIS와 교차검증 완료)
+  - `서울특별시 강남구, ..., 서울특별시 중랑구` (자치구 25개 전체 나열)
+- 51건 전부 `is_seoul_recipient()` 통과 (0건 leak)
+
+**결정: `sbLawArea1=1100000000`은 다중지역 서울 레코드를 누락하지 않는다.** 프로덕션
+fallback은 Seoul 필터 URL을 사용하고, 반환된 각 레코드에 client-side `is_seoul_recipient()`
+검증을 그대로 병행한다.
+
+### 조회기간
+
+`startDate`/`endDate` 7일 범위(`2026-07-09`~`2026-07-16`)가 정상 동작함을 확인. 그 이상의
+범위 제한 여부는 별도로 테스트하지 않았다 (섹션 7의 최대 1주일 정책을 그대로 사용).
 
 ## 1. 결론
 

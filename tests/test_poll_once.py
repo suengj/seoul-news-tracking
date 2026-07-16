@@ -201,3 +201,53 @@ def test_notify_existing_sends_baseline_on_first_run(env_setup, monkeypatch):
     assert len(senders) == 1
     assert set(senders[0].sent_source_ids) == {"DS1", "DS2"}
     assert senders[0].sent_chat_ids == ["111", "111"]
+
+
+def test_cutover_gate_blocks_non_send_run_on_unbootstrapped_existing_db(
+    env_setup, monkeypatch, capsys
+):
+    """v0.5.0: a pre-existing (non-empty) database that predates the source
+    cutover must be blocked even without --send. Inserting new_records here
+    would permanently mark the current MOIS/SafeKorea window as "already
+    known" — a later `source_cutover_mois --bootstrap` run would then skip
+    them as already-known instead of registering them as baseline, and a
+    subsequent --send run would never see them as new either: silently lost
+    forever."""
+    db = Database(env_setup)
+    db.insert(_make_bare_record("LEGACY1", 0), is_baseline=True)
+    db.close()
+
+    monkeypatch.setattr(poll_once, "fetch_records", _fake_fetch(_records("DS1", "DS2")))
+    monkeypatch.setattr(poll_once, "TelegramSender", FakeSender)
+
+    rc = poll_once.main([])  # no --send, no --dry-run
+    assert rc == 1
+    assert "bootstrap" in capsys.readouterr().err.lower()
+
+    db2 = Database(env_setup)
+    # DS1/DS2 must not have been inserted at all.
+    assert db2.known_source_ids() == {"LEGACY1"}
+    db2.close()
+
+
+def test_full_collection_failure_updates_error_category(env_setup, monkeypatch):
+    """Even when collection fails outright (both MOIS and SafeKorea), the
+    failure category must still be recorded so /status's shared '최근 수집
+    원천' / 'Primary 최근 오류' reflect the current outage rather than a
+    stale category left over from a previous, unrelated cycle."""
+    from app.collector import CollectorError
+
+    def failing_fetch(**kwargs):
+        raise CollectorError("both sources failed", primary_error_category="timeout")
+
+    monkeypatch.setattr(poll_once, "fetch_records", failing_fetch)
+    monkeypatch.setattr(poll_once, "TelegramSender", FakeSender)
+
+    rc = poll_once.main(["--send"])
+    assert rc == 1
+
+    db = Database(env_setup)
+    state = db.get_system_state()
+    assert state.last_primary_error_category == "timeout"
+    assert state.last_collection_source == "none"
+    db.close()

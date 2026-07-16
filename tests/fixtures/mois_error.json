@@ -1,0 +1,8 @@
+{
+  "header": {
+    "resultCode": "30",
+    "resultMsg": "SERVICE KEY IS NOT REGISTERED ERROR",
+    "errorMsg": "등록되지 않은 서비스키"
+  },
+  "body": null
+}

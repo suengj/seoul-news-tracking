@@ -19,7 +19,7 @@ database. There is no VPS, no Cloudflare, no production scheduler yet — see
 A single-threaded, sequential loop:
 
 1. read `polling_enabled` from `system_state`
-2. if paused, skip the Seoul SafeCity request entirely this cycle
+2. if paused, skip the collection request entirely this cycle
 3. if active, run one collect → dedup → send cycle (the same logic as
    `poll_once --send`)
 4. run retention cleanup if `CLEANUP_INTERVAL_HOURS` has elapsed since the
@@ -50,7 +50,7 @@ One long-polling process, one `getUpdates` offset sequence, handling
   selection/preview/confirm/cancel/AI flow, delegated to
   `app.template_flow.dispatch_callback` (see `docs/telegram_template_flow.md`)
 
-It never initiates a Seoul SafeCity request itself — it only reads/writes
+It never initiates a collection request itself — it only reads/writes
 `system_state`, `messages`, and the template_* tables in the shared
 database. There is exactly one bot process; nothing else calls
 `getUpdates` for this bot token.
@@ -90,7 +90,7 @@ operator's** automatic delivery — it sets that operator's subscription
 `muted` and does **not** touch the shared poller or any other operator. Use
 `/resume` (alias of `/unmute`) to start receiving again.
 
-- Muting one operator never stops the shared SafeCity collection; other
+- Muting one operator never stops the shared collection; other
   operators keep receiving alerts.
 - `/status`, `/latest`, `/history`, `/resume` keep working while muted.
 - Each operator's status is persisted in SQLite (`telegram_subscriptions`)
@@ -101,7 +101,7 @@ operator's** automatic delivery — it sets that operator's subscription
 
 ### Local shared-collector control (`poller_control`, v0.4.1)
 
-`poller_control` is the only explicit control over the shared SafeCity
+`poller_control` is the only explicit control over the shared
 collector. It is a **local host command**, not a Telegram command, and is not
 exposed via `/help`. `pause` here stops collection for **everyone** — it is
 not a personal Telegram mute.

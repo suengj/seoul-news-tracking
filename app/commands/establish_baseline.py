@@ -30,7 +30,7 @@ def main() -> int:
         run_id = db.start_run("establish_baseline")
 
         try:
-            result = fetch_records()
+            result = fetch_records(settings=settings)
         except CollectorError as exc:
             db.finish_run(run_id, status="failed", detail=str(exc))
             print(f"FAILED: {exc}", file=sys.stderr)
@@ -38,6 +38,14 @@ def main() -> int:
 
         for record in result.records:
             db.insert(record, is_baseline=True)
+
+        # This baseline insert loop IS a safe v0.5.0 source cutover for a
+        # fresh/empty database (equivalent to source_cutover_mois
+        # --bootstrap on a non-empty one) — without this, poll_once's
+        # cutover gate would treat this now-non-empty database as still
+        # requiring an explicit `source_cutover_mois --bootstrap` run before
+        # any future --send cycle could deliver anything.
+        db.mark_source_bootstrap_completed()
 
         db.finish_run(
             run_id,

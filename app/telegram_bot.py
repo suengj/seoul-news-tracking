@@ -355,7 +355,10 @@ class TelegramBotRunner:
         if response.status_code != 200:
             raise TelegramPollError(f"HTTP {response.status_code}: {response.text[:200]}")
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise TelegramPollError(f"invalid JSON response: {exc}") from exc
         if not data.get("ok"):
             raise TelegramPollError(f"Telegram API returned ok=false: {data}")
         return data.get("result", [])

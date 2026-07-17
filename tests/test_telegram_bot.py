@@ -612,6 +612,22 @@ def test_getupdates_raises_pollerror_on_network_failure(make_settings, db):
         bot.get_updates()
 
 
+def test_getupdates_raises_pollerror_on_invalid_json(make_settings, db):
+    """A malformed/truncated response body is the same failure class as a
+    connection reset — get_updates() must convert it to TelegramPollError
+    (retryable) rather than let response.json()'s ValueError crash the
+    process, since that would reproduce the same live-outage bug via a
+    different trigger."""
+    settings = make_settings(telegram_allowed_user_ids=(111,))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not json")
+
+    bot = make_bot(settings, db, handler)
+    with pytest.raises(TelegramPollError):
+        bot.get_updates()
+
+
 def test_getupdates_raises_pollerror_on_connection_reset(make_settings, db):
     """A mid-response reset (httpx.ReadError) must be treated the same as a
     connect-time failure — it is a transient network condition, not a bug.

@@ -47,33 +47,32 @@ RESTART_INITIAL_BACKOFF_SECONDS = 2.0
 RESTART_MAX_BACKOFF_SECONDS = 60.0
 RESTART_WINDOW_SECONDS = 600.0
 MAX_RESTARTS_IN_WINDOW = 5
-MIN_HEALTHY_UPTIME_SECONDS = 60.0
 
 
 @dataclass
 class _RestartTracker:
     """Per-child crash-loop bookkeeping, kept separate from subprocess I/O
     so the restart/give-up decision is unit-testable without spawning real
-    processes. One instance per child (poller, telegram_bot)."""
+    processes. One instance per child (poller, telegram_bot).
+
+    Counts crashes in a rolling RESTART_WINDOW_SECONDS window regardless of
+    how long each individual run lasted. An earlier version reset the
+    counter on any run that survived 60s, which meant a child crashing every
+    ~65s would restart forever and never trip the give-up guard — exactly
+    the failure mode this exists to catch, just at a slower cadence. Any
+    crash frequency that exceeds MAX_RESTARTS_IN_WINDOW within the window is
+    treated as a real problem, deserving human attention rather than
+    infinite silent retries."""
 
     backoff: float = RESTART_INITIAL_BACKOFF_SECONDS
     restart_count: int = 0
     window_start: float = field(default_factory=time.monotonic)
 
-    def record_healthy_run(self, uptime_seconds: float) -> None:
-        """Call with how long the just-crashed process had been running.
-        A run that survived MIN_HEALTHY_UPTIME_SECONDS is treated as a
-        fresh problem, not a continuation of a crash loop — reset."""
-        if uptime_seconds >= MIN_HEALTHY_UPTIME_SECONDS:
-            self.restart_count = 0
-            self.backoff = RESTART_INITIAL_BACKOFF_SECONDS
-            self.window_start = time.monotonic()
-
     def next_backoff_or_give_up(self) -> float | None:
-        """Call once per crash (after record_healthy_run). Returns the
-        backoff (seconds) to wait before restarting, or None if the
-        crash-loop guard says give up — this child has crashed too many
-        times within the rolling window to keep retrying blindly."""
+        """Call once per crash. Returns the backoff (seconds) to wait
+        before restarting, or None if the crash-loop guard says give up —
+        this child has crashed too many times within the rolling window to
+        keep retrying blindly."""
         now = time.monotonic()
         if now - self.window_start > RESTART_WINDOW_SECONDS:
             self.restart_count = 0
@@ -91,6 +90,27 @@ class _RestartTracker:
 
 def _spawn(module: str) -> subprocess.Popen:
     return subprocess.Popen([sys.executable, "-m", module])
+
+
+_SLEEP_STEP_SECONDS = 0.5
+
+
+def _interruptible_sleep(duration: float, stop_requested: Callable[[], bool] | None) -> None:
+    """Sleep in short increments instead of one long time.sleep(duration),
+    so a shutdown signal is honored within _SLEEP_STEP_SECONDS instead of
+    only after the full backoff elapses. Matters because backoff can reach
+    RESTART_MAX_BACKOFF_SECONDS (60s) — launchd's default ExitTimeOut is 20s,
+    so an uninterruptible sleep here risked launchd SIGKILLing run_local
+    mid-backoff, bypassing its finally-block cleanup and orphaning children."""
+    if stop_requested is None:
+        time.sleep(duration)
+        return
+
+    remaining = duration
+    while remaining > 0 and not stop_requested():
+        chunk = min(_SLEEP_STEP_SECONDS, remaining)
+        time.sleep(chunk)
+        remaining -= chunk
 
 
 def _check_children(
@@ -117,9 +137,11 @@ def _check_children(
         if rc is None:
             continue
 
-        logger.error("%s exited unexpectedly with code %s", name, rc)
+        uptime = time.monotonic() - started_at[name]
+        logger.error(
+            "%s exited unexpectedly with code %s after %.1fs uptime", name, rc, uptime
+        )
         tracker = trackers[name]
-        tracker.record_healthy_run(time.monotonic() - started_at[name])
         backoff = tracker.next_backoff_or_give_up()
         if backoff is None:
             logger.error(
@@ -131,9 +153,9 @@ def _check_children(
             return False
 
         logger.warning("restarting %s in %.1fs after unexpected exit", name, backoff)
-        time.sleep(backoff)
+        _interruptible_sleep(backoff, stop_requested)
         if stop_requested is not None and stop_requested():
-            continue
+            break
 
         new_proc = _spawn(module)
         procs[name] = new_proc

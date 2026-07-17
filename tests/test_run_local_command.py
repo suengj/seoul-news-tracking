@@ -69,7 +69,6 @@ def test_terminate_all_kills_processes_that_ignore_sigterm(monkeypatch):
 
 def test_first_crash_returns_initial_backoff():
     tracker = run_local._RestartTracker()
-    tracker.record_healthy_run(uptime_seconds=0.0)
     assert tracker.next_backoff_or_give_up() == run_local.RESTART_INITIAL_BACKOFF_SECONDS
 
 
@@ -77,7 +76,6 @@ def test_consecutive_crashes_double_backoff_up_to_cap():
     tracker = run_local._RestartTracker()
     backoffs = []
     for _ in range(8):
-        tracker.record_healthy_run(uptime_seconds=0.0)
         backoff = tracker.next_backoff_or_give_up()
         if backoff is None:
             break
@@ -90,52 +88,69 @@ def test_consecutive_crashes_double_backoff_up_to_cap():
 
 def test_gives_up_after_max_restarts_in_window():
     tracker = run_local._RestartTracker()
-    results = []
-    for _ in range(run_local.MAX_RESTARTS_IN_WINDOW + 2):
-        tracker.record_healthy_run(uptime_seconds=0.0)
-        results.append(tracker.next_backoff_or_give_up())
+    results = [tracker.next_backoff_or_give_up() for _ in range(run_local.MAX_RESTARTS_IN_WINDOW + 2)]
 
     assert results[: run_local.MAX_RESTARTS_IN_WINDOW].count(None) == 0
     assert results[-1] is None
 
 
-def test_healthy_run_resets_counter_and_backoff():
+def test_moderate_cadence_crash_loop_still_gives_up():
+    """Regression: an earlier version reset the counter on any run that
+    survived 60s (MIN_HEALTHY_UPTIME_SECONDS), which meant a child crashing
+    every ~65s would restart forever and never trip the guard. The counter
+    must now depend only on crash frequency within the rolling window, not
+    on how long any individual run lasted — simulate crashes spaced 65s
+    apart (all "healthy" by the old, now-removed standard) and confirm the
+    guard still fires once enough of them land inside the window."""
     tracker = run_local._RestartTracker()
-    for _ in range(3):
-        tracker.record_healthy_run(uptime_seconds=0.0)
-        tracker.next_backoff_or_give_up()
-    assert tracker.restart_count == 3
-    assert tracker.backoff > run_local.RESTART_INITIAL_BACKOFF_SECONDS
+    results = []
+    for _ in range(run_local.MAX_RESTARTS_IN_WINDOW + 2):
+        results.append(tracker.next_backoff_or_give_up())
+        tracker.window_start -= 65.0  # simulate 65s of real time passing
 
-    # This crash followed a long, healthy run — treated as a fresh problem.
-    tracker.record_healthy_run(uptime_seconds=run_local.MIN_HEALTHY_UPTIME_SECONDS + 1)
-    assert tracker.restart_count == 0
-    assert tracker.next_backoff_or_give_up() == run_local.RESTART_INITIAL_BACKOFF_SECONDS
-
-
-def test_short_uptime_does_not_reset_crash_loop_counter():
-    tracker = run_local._RestartTracker()
-    tracker.record_healthy_run(uptime_seconds=0.0)
-    tracker.next_backoff_or_give_up()
-
-    tracker.record_healthy_run(uptime_seconds=run_local.MIN_HEALTHY_UPTIME_SECONDS - 1)
-    assert tracker.restart_count == 1  # not reset
+    assert None in results
 
 
 def test_window_expiry_resets_counter():
     tracker = run_local._RestartTracker()
     for _ in range(run_local.MAX_RESTARTS_IN_WINDOW):
-        tracker.record_healthy_run(uptime_seconds=0.0)
         tracker.next_backoff_or_give_up()
     assert tracker.restart_count == run_local.MAX_RESTARTS_IN_WINDOW
 
     # Simulate the rolling window having elapsed since the first crash in it.
     tracker.window_start -= run_local.RESTART_WINDOW_SECONDS + 1
 
-    tracker.record_healthy_run(uptime_seconds=0.0)
     backoff = tracker.next_backoff_or_give_up()
     assert backoff == run_local.RESTART_INITIAL_BACKOFF_SECONDS
     assert tracker.restart_count == 1
+
+
+# -- _interruptible_sleep: shutdown signal must not wait out a long backoff --
+
+
+def test_interruptible_sleep_returns_early_when_stop_requested():
+    """A shutdown signal arriving mid-backoff must be honored within
+    _SLEEP_STEP_SECONDS, not only after the full duration — otherwise a
+    backoff near RESTART_MAX_BACKOFF_SECONDS (60s) could outlast launchd's
+    default 20s ExitTimeOut and get SIGKILLed before cleanup runs."""
+    calls = {"n": 0}
+
+    def stop_after_two_checks() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 2
+
+    start = time.monotonic()
+    run_local._interruptible_sleep(30.0, stop_after_two_checks)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 2.0  # nowhere near the full 30s duration
+    assert calls["n"] >= 2
+
+
+def test_interruptible_sleep_with_no_stop_check_sleeps_full_duration():
+    start = time.monotonic()
+    run_local._interruptible_sleep(0.1, None)
+    assert time.monotonic() - start >= 0.1
 
 
 # -- _check_children: restart-in-place integration, real trivial subprocesses -
@@ -156,7 +171,7 @@ def test_check_children_restarts_only_the_crashed_child(monkeypatch):
 
     healthy = _trivial_sleep()
     crashed = _trivial_exit(1)
-    time.sleep(0.3)  # let `crashed` actually exit before polling it
+    crashed.wait()  # deterministically wait for it to actually exit
     try:
         procs = {"healthy": healthy, "crashed": crashed}
         started_at = {"healthy": time.monotonic(), "crashed": time.monotonic()}
@@ -180,10 +195,47 @@ def test_check_children_restarts_only_the_crashed_child(monkeypatch):
         assert procs["crashed"] is not crashed  # replaced by a new process
         assert procs["crashed"].poll() is None  # the replacement is alive
     finally:
-        for proc in (healthy, crashed, procs["crashed"]):
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait()
+        run_local._terminate_all({"healthy": healthy, "crashed_replacement": procs["crashed"]})
+
+
+def test_check_children_skips_respawn_and_remaining_children_when_stopping(monkeypatch):
+    """If a shutdown signal arrives during one child's backoff, that child
+    must not be respawned, and no *other* crashed child in the same tick
+    should be checked either — main() is about to tear everything down
+    anyway, so there's no point starting more processes only to kill them."""
+    monkeypatch.setattr(run_local, "RESTART_INITIAL_BACKOFF_SECONDS", 0.01)
+
+    crashed_a = _trivial_exit(1)
+    crashed_b = _trivial_exit(1)
+    crashed_a.wait()
+    crashed_b.wait()
+    try:
+        procs = {"a": crashed_a, "b": crashed_b}
+        started_at = {"a": time.monotonic(), "b": time.monotonic()}
+        trackers = {"a": run_local._RestartTracker(), "b": run_local._RestartTracker()}
+
+        spawn_calls = {"n": 0}
+
+        def fake_spawn(module: str) -> subprocess.Popen:
+            spawn_calls["n"] += 1
+            return _trivial_sleep()
+
+        monkeypatch.setattr(run_local, "_spawn", fake_spawn)
+
+        ok = run_local._check_children(
+            procs,
+            started_at,
+            trackers,
+            child_specs=(("a", "unused"), ("b", "unused")),
+            stop_requested=lambda: True,
+        )
+
+        assert ok is True
+        assert spawn_calls["n"] == 0
+        assert procs["a"] is crashed_a  # never replaced
+        assert procs["b"] is crashed_b  # "b" never even checked
+    finally:
+        run_local._terminate_all({"a": procs["a"], "b": procs["b"]})
 
 
 def test_check_children_gives_up_after_repeated_crashes(monkeypatch):
@@ -196,7 +248,7 @@ def test_check_children_gives_up_after_repeated_crashes(monkeypatch):
     monkeypatch.setattr(run_local, "_spawn", fake_spawn)
 
     crashed = _trivial_exit(1)
-    time.sleep(0.3)
+    crashed.wait()  # deterministically wait for it to actually exit
     procs = {"flaky": crashed}
     started_at = {"flaky": time.monotonic()}
     trackers = {"flaky": run_local._RestartTracker()}
@@ -206,7 +258,7 @@ def test_check_children_gives_up_after_repeated_crashes(monkeypatch):
         procs, started_at, trackers, child_specs=(("flaky", "unused"),)
     )
     assert ok is True
-    time.sleep(0.3)  # let the replacement (also exit(1)) actually exit
+    procs["flaky"].wait()  # let the replacement (also exit(1)) actually exit
 
     # Second check: this is attempt 2, over the limit — must give up.
     ok = run_local._check_children(

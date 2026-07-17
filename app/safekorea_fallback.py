@@ -292,6 +292,22 @@ def fetch_records(
                 f"SafeKorea fallback pagination exceeded max page guard ({settings.safekorea_max_pages})"
             )
 
+    # startDate is a requested lower bound, same trust assumption as MOIS's
+    # crtDt (see app/mois_api.py) — defend against the site silently
+    # returning a row outside the requested window rather than treating it
+    # as a genuinely new message.
+    window_lower_bound = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=SEOUL_TZ)
+    stale_count = sum(1 for r in all_records if r.sent_at < window_lower_bound)
+    if stale_count:
+        logger.warning(
+            "SafeKorea fallback returned %d record(s) older than the requested "
+            "startDate=%s lower bound; dropping them as a contract violation, "
+            "not new messages",
+            stale_count,
+            start_date,
+        )
+    all_records = [r for r in all_records if r.sent_at >= window_lower_bound]
+
     seoul_records = [r for r in all_records if is_seoul_recipient(r.sender_or_region)]
     seoul_records.sort(key=lambda r: r.sent_at)
 

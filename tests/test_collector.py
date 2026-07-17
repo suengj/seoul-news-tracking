@@ -32,16 +32,9 @@ def _no_sleep(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _fixed_clock(monkeypatch):
-    """Pin "now" so crt_dt (today - lookback_days) lines up with
-    mois_success.json's embedded 2026/07/14 timestamps regardless of the
-    real wall clock — see the matching fixture in test_mois_api.py."""
-    import datetime as dt
-
-    monkeypatch.setattr(
-        "app.mois_api._kst_today",
-        lambda: dt.datetime(2026, 7, 15, 12, 0, 0, tzinfo=dt.timezone(dt.timedelta(hours=9))),
-    )
+def _fixed_clock(fixed_mois_clock):
+    """Applies conftest's fixed_mois_clock (pinned to match mois_success.json's
+    embedded 2026/07/14 timestamps) to every test in this file."""
 
 
 @pytest.fixture

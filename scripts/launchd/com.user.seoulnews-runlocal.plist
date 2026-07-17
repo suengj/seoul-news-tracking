@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  seoul-news-tracking — run_local (poller + Telegram bot), long-running.
+  KeepAlive means launchd restarts run_local itself if it exits for any
+  reason (including the crash-loop "give up" path in app/commands/run_local.py).
+  run_local's own supervision layer restarts poller/telegram_bot individually
+  when only one of them crashes — see that module's docstring.
+
+  Install:   cp scripts/launchd/com.user.seoulnews-runlocal.plist ~/Library/LaunchAgents/
+             launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.seoulnews-runlocal.plist
+  Uninstall: launchctl bootout gui/$(id -u)/com.user.seoulnews-runlocal
+             rm ~/Library/LaunchAgents/com.user.seoulnews-runlocal.plist
+  Status:    launchctl print gui/$(id -u)/com.user.seoulnews-runlocal
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.seoulnews-runlocal</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/suengj/Developer/PJT/p11_seoulnews/.venv/bin/python</string>
+        <string>-u</string>
+        <string>-m</string>
+        <string>app.commands.run_local</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/suengj/Developer/PJT/p11_seoulnews</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/suengj/Developer/PJT/p11_seoulnews/data/logs/launchd_run_local.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/suengj/Developer/PJT/p11_seoulnews/data/logs/launchd_run_local.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

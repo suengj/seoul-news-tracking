@@ -89,6 +89,40 @@ def test_multi_region_seoul_record_included(settings):
     assert "서울특별시 테스트구" in multi.sender_or_region
 
 
+_DATED_ROW_TEMPLATE = (
+    '<tr><td>강풍</td><td class="tit">'
+    "<a href=\"javascript:onSubmit('{sn}');\">본문{sn}</a>"
+    "<p> ㆍ&nbsp;발송일시 : {sent_at} ㆍ&nbsp;긴급단계 : 안전안내"
+    "  ㆍ&nbsp;송출지역 : 서울특별시 테스트구 </p></td></tr>"
+)
+
+
+def test_records_older_than_start_date_lower_bound_are_dropped(settings):
+    """Same defensive guard as app/mois_api.py's crtDt check, for SafeKorea's
+    analogous startDate/endDate window params: if the site ever returns a
+    row outside the requested window (the exact failure class observed live
+    on the MOIS primary — see app/mois_api.py), it must be dropped rather
+    than auto-delivered as a fresh alert. The "fresh" row's date is computed
+    from the real clock (1 day back) so this test doesn't itself depend on a
+    pinned clock and stays valid regardless of when it runs."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    fresh_dt = datetime.now(tz=ZoneInfo("Asia/Seoul")) - timedelta(days=1)
+    page_html = (
+        '<div class="board-list"><table><tbody>'
+        + _DATED_ROW_TEMPLATE.format(sn="900020", sent_at="2023/09/16 11:42:02")
+        + _DATED_ROW_TEMPLATE.format(sn="900021", sent_at=fresh_dt.strftime("%Y/%m/%d %H:%M:%S"))
+        + "</tbody></table></div>"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=page_html)
+
+    records = fetch_records(settings, transport=_transport(handler))
+    assert [r.source_id for r in records] == ["SAFEKOREA:900021"]
+
+
 def test_empty_result_is_not_an_error(settings):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=_fixture_text("safekorea_list_empty.html"))

@@ -298,6 +298,23 @@ def fetch_records(
 
     records = [_validate_and_convert(raw, detected_at=detected_at) for raw in all_raw_items]
 
+    # crtDt is documented (and empirically confirmed) as an inclusive lower
+    # bound, so a record older than it is a live API contract violation, not
+    # a genuinely new message. Observed live: a cycle that correctly sent
+    # crtDt=20260716 got back records dated back to 2023-09 — the API
+    # silently ignored its own filter. Without this guard those get treated
+    # as brand-new and auto-delivered to every operator as a fresh alert.
+    crt_dt_lower_bound = datetime.strptime(crt_dt, "%Y%m%d").replace(tzinfo=SEOUL_TZ)
+    stale_count = sum(1 for r in records if r.sent_at < crt_dt_lower_bound)
+    if stale_count:
+        logger.warning(
+            "MOIS API returned %d record(s) older than the requested crtDt=%s lower "
+            "bound; dropping them as a live API contract violation, not new messages",
+            stale_count,
+            crt_dt,
+        )
+    records = [r for r in records if r.sent_at >= crt_dt_lower_bound]
+
     seoul_records = [r for r in records if is_seoul_recipient(r.sender_or_region)]
     seoul_records.sort(key=lambda r: r.sent_at)
 

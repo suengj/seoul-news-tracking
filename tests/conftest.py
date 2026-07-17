@@ -32,6 +32,20 @@ def _never_load_the_real_dotenv(tmp_path, monkeypatch):
     monkeypatch.setattr(config_module, "PROJECT_ROOT", tmp_path)
 
 
+@pytest.fixture
+def fixed_mois_clock(monkeypatch):
+    """Pin app.mois_api._kst_today() to 2026-07-15 12:00 KST so tests whose
+    fixtures embed 2026/07/14 timestamps (mois_success.json etc.) stop
+    depending on the real wall clock staying within the 1-day lookback
+    window used to compute crtDt. Not autouse — request it explicitly (or
+    via a thin per-file autouse wrapper) since it only matters to
+    MOIS-collection tests."""
+    monkeypatch.setattr(
+        "app.mois_api._kst_today",
+        lambda: datetime(2026, 7, 15, 12, 0, 0, tzinfo=SEOUL_TZ),
+    )
+
+
 def build_settings(**overrides) -> Settings:
     """Construct a fully-populated Settings for tests without touching the environment."""
     defaults = dict(

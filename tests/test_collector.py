@@ -31,6 +31,12 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr("app.safekorea_fallback.time.sleep", lambda _seconds: None)
 
 
+@pytest.fixture(autouse=True)
+def _fixed_clock(fixed_mois_clock):
+    """Applies conftest's fixed_mois_clock (pinned to match mois_success.json's
+    embedded 2026/07/14 timestamps) to every test in this file."""
+
+
 @pytest.fixture
 def settings(make_settings):
     return make_settings(

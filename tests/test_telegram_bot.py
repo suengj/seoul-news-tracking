@@ -610,3 +610,20 @@ def test_getupdates_raises_pollerror_on_network_failure(make_settings, db):
     bot = make_bot(settings, db, handler)
     with pytest.raises(TelegramPollError):
         bot.get_updates()
+
+
+def test_getupdates_raises_pollerror_on_connection_reset(make_settings, db):
+    """A mid-response reset (httpx.ReadError) must be treated the same as a
+    connect-time failure — it is a transient network condition, not a bug.
+    Previously only httpx.TimeoutException/ConnectError were caught here, so
+    a bare ReadError (observed live as `[Errno 54] Connection reset by peer`)
+    propagated unhandled out of run_forever and crashed the whole bot
+    process instead of backing off and retrying."""
+    settings = make_settings(telegram_allowed_user_ids=(111,))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("Connection reset by peer", request=request)
+
+    bot = make_bot(settings, db, handler)
+    with pytest.raises(TelegramPollError):
+        bot.get_updates()

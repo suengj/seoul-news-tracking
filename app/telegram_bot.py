@@ -345,7 +345,7 @@ class TelegramBotRunner:
                     "limit": GETUPDATES_LIMIT,
                 },
             )
-        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+        except httpx.TransportError as exc:
             raise TelegramPollError(f"network error: {exc}") from exc
 
         if response.status_code == 409:

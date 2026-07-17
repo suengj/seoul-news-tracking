@@ -67,7 +67,18 @@ python -m app.commands.run_local
 ```
 
 `run_local` starts both as child processes, logs each one's PID, and
-monitors them; if either exits unexpectedly it shuts the other down too.
+monitors them. If one exits unexpectedly, only that one is restarted (with
+backoff) — the sibling keeps running. A child that crashes repeatedly in a
+short window is not retried forever: after enough crashes within the
+rolling window, `run_local` gives up and exits nonzero rather than
+crash-looping silently forever.
+
+An optional outer layer (`scripts/launchd/com.user.seoulnews-runlocal.plist`,
+macOS launchd, `KeepAlive`) restarts `run_local` itself if it exits for any
+reason — including that give-up path, or any exception outside its own
+child-supervision loop. See the plist's header comment for install/uninstall
+commands. Without this outer layer, `run_local` giving up still leaves the
+whole service down until a human restarts it manually.
 
 ## Stopping locally
 
@@ -219,8 +230,11 @@ SQLite's concurrency model assumes co-located processes on one filesystem.
 
 ## Limitations before server deployment
 
-- No process supervision beyond `run_local`'s own child-process monitoring
-  — no systemd/launchd unit, no auto-restart on crash, no VPS.
+- Process supervision is local-machine only (`run_local`'s own child
+  restart logic plus an optional launchd LaunchAgent around it) — no VPS,
+  no systemd, doesn't survive the machine being off, and a LaunchAgent
+  specifically only runs while the user is logged in (use a LaunchDaemon
+  instead if it must run without any user session).
 - No Cloudflare Worker, no cron, no public webhook.
 - Long polling only; see the webhook migration note above.
 - SQLite is a single local file; see the D1/PostgreSQL migration note above.

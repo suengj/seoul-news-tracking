@@ -27,6 +27,21 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr("app.mois_api.time.sleep", lambda _seconds: None)
 
 
+@pytest.fixture(autouse=True)
+def _fixed_clock(monkeypatch):
+    """Pin "now" so crt_dt (today - lookback_days) lines up with the fixture
+    files' embedded 2026/07/14 timestamps regardless of the real wall clock —
+    otherwise the crt_dt-lower-bound guard in fetch_records would (correctly)
+    drop them once real time moves past 2026/07/15. Tests that need a
+    different "now" (e.g. the stale-record guard test) override this locally."""
+    import datetime as dt
+
+    monkeypatch.setattr(
+        "app.mois_api._kst_today",
+        lambda: dt.datetime(2026, 7, 15, 12, 0, 0, tzinfo=dt.timezone(dt.timedelta(hours=9))),
+    )
+
+
 @pytest.fixture
 def settings(make_settings):
     return make_settings(safetydata_service_key="TEST_KEY", safetydata_num_of_rows=20)
@@ -108,6 +123,30 @@ def test_success_response_filters_to_seoul_and_sorts_by_sent_at(settings):
     assert [r.source_id for r in records] == ["MOIS:900001", "MOIS:900002", "MOIS:900003"]
     # Sorted ascending by sent_at (page order in the fixture is not sorted).
     assert records[0].sent_at < records[1].sent_at < records[2].sent_at
+
+
+def test_records_older_than_crt_dt_lower_bound_are_dropped(settings, monkeypatch, caplog):
+    """Live-observed anomaly: a cycle that correctly sent crtDt=20260716 got
+    back a record dated 2023-09-16 anyway — the API silently ignored its own
+    documented inclusive-lower-bound contract. Without a client-side guard,
+    that record would be treated as brand-new and auto-delivered to every
+    operator. crt_dt is fixed via _kst_today so this doesn't depend on the
+    real wall clock."""
+    import datetime as dt
+
+    monkeypatch.setattr(
+        "app.mois_api._kst_today",
+        lambda: dt.datetime(2026, 7, 17, 12, 0, 0, tzinfo=dt.timezone(dt.timedelta(hours=9))),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_load_fixture("mois_stale_and_fresh.json"))
+
+    caplog.set_level("WARNING")
+    records = fetch_records(settings, transport=_transport(handler))
+
+    assert [r.source_id for r in records] == ["MOIS:900010"]
+    assert "older than the requested crtDt" in caplog.text
 
 
 def test_multi_region_seoul_record_is_included(settings):

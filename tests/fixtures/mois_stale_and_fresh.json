@@ -1,0 +1,32 @@
+{
+  "header": {
+    "resultCode": "00",
+    "resultMsg": "NORMAL SERVICE",
+    "errorMsg": null
+  },
+  "numOfRows": 20,
+  "pageNo": 1,
+  "totalCount": 2,
+  "body": [
+    {
+      "SN": 205173,
+      "CRT_DT": "2023/09/16 11:42:02",
+      "MSG_CN": "테스트 오래된 문구입니다.",
+      "RCPTN_RGN_NM": "서울특별시 테스트구 ",
+      "EMRG_STEP_NM": "안전안내",
+      "DST_SE_NM": "실종",
+      "REG_YMD": "2023/09/16 11:42:20.000000000",
+      "MDFCN_YMD": "2023/09/16 11:42:20.000000000"
+    },
+    {
+      "SN": 900010,
+      "CRT_DT": "2026/07/16 10:00:00",
+      "MSG_CN": "테스트 최신 문구입니다.",
+      "RCPTN_RGN_NM": "서울특별시 테스트구 ",
+      "EMRG_STEP_NM": "안전안내",
+      "DST_SE_NM": "호우",
+      "REG_YMD": "2026/07/16 10:00:20.000000000",
+      "MDFCN_YMD": "2026/07/16 10:00:20.000000000"
+    }
+  ]
+}

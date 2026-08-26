@@ -17,3 +17,9 @@ logs/*
 artifacts/history_raw/*
 *.log
 .DS_Store
+
+# Local-only macOS launchd plist (machine-specific paths). Use plist.example on GitHub.
+scripts/launchd/com.user.seoulnews-runlocal.plist
+
+# Local-only Seoul City template workbook (not redistributable). Runtime uses config/message_templates.yaml.
+templates/서울시_재난특보_X템플릿.xlsx

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 
 from app.commands.sync_templates_from_excel import (
     build_from_workbook,
@@ -18,6 +19,10 @@ WORKBOOK = PROJECT_ROOT / "templates" / "서울시_재난특보_X템플릿.xlsx"
 
 
 def test_workbook_sync_counts_and_loader_accept_generated_yaml(tmp_path):
+    if not WORKBOOK.is_file():
+        pytest.skip(
+            "Local-only workbook missing (templates/서울시_재난특보_X템플릿.xlsx is gitignored)"
+        )
     sync = build_from_workbook(WORKBOOK)
     assert sync.ok, [i.format() for i in sync.issues]
     assert sync.total == EXPECTED_WORKBOOK_TOTAL

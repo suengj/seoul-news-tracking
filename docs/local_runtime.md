@@ -76,7 +76,9 @@ crash-looping silently forever.
 An optional outer layer (`scripts/launchd/com.user.seoulnews-runlocal.plist`,
 macOS launchd, `KeepAlive`) restarts `run_local` itself if it exits for any
 reason — including that give-up path, or any exception outside its own
-child-supervision loop. See the plist's header comment for install/uninstall
+child-supervision loop. Copy `scripts/launchd/com.user.seoulnews-runlocal.plist.example`
+to a local-only `com.user.seoulnews-runlocal.plist` (gitignored), set your
+project paths, then see the plist header comment for install/uninstall
 commands. Without this outer layer, `run_local` giving up still leaves the
 whole service down until a human restarts it manually.
 

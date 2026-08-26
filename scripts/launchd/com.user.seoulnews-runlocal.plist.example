@@ -7,11 +7,17 @@
   run_local's own supervision layer restarts poller/telegram_bot individually
   when only one of them crashes — see that module's docstring.
 
-  Install:   cp scripts/launchd/com.user.seoulnews-runlocal.plist ~/Library/LaunchAgents/
-             launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.seoulnews-runlocal.plist
-  Uninstall: launchctl bootout gui/$(id -u)/com.user.seoulnews-runlocal
-             rm ~/Library/LaunchAgents/com.user.seoulnews-runlocal.plist
-  Status:    launchctl print gui/$(id -u)/com.user.seoulnews-runlocal
+  Copy this example to a local-only plist (not committed):
+    cp scripts/launchd/com.user.seoulnews-runlocal.plist.example \
+       scripts/launchd/com.user.seoulnews-runlocal.plist
+  Edit PROJECT_ROOT below, then install:
+    cp scripts/launchd/com.user.seoulnews-runlocal.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.seoulnews-runlocal.plist
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.user.seoulnews-runlocal
+    rm ~/Library/LaunchAgents/com.user.seoulnews-runlocal.plist
+  Status:
+    launchctl print gui/$(id -u)/com.user.seoulnews-runlocal
 -->
 <plist version="1.0">
 <dict>
@@ -19,13 +25,13 @@
     <string>com.user.seoulnews-runlocal</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/suengj/Developer/PJT/p11_seoulnews/.venv/bin/python</string>
+        <string>/path/to/seoul-news-tracking/.venv/bin/python</string>
         <string>-u</string>
         <string>-m</string>
         <string>app.commands.run_local</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/suengj/Developer/PJT/p11_seoulnews</string>
+    <string>/path/to/seoul-news-tracking</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -33,9 +39,9 @@
     <key>ThrottleInterval</key>
     <integer>60</integer>
     <key>StandardOutPath</key>
-    <string>/Users/suengj/Developer/PJT/p11_seoulnews/data/logs/launchd_run_local.log</string>
+    <string>/path/to/seoul-news-tracking/data/logs/launchd_run_local.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/suengj/Developer/PJT/p11_seoulnews/data/logs/launchd_run_local.log</string>
+    <string>/path/to/seoul-news-tracking/data/logs/launchd_run_local.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>

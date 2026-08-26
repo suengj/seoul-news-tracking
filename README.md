@@ -1,244 +1,182 @@
-# Seoul News Tracking — Service v1
+# Seoul News Tracking
 
-Collects 재난문자 (disaster message) records for Seoul from the official
-행정안전부(MOIS) SafetyData Open API (`DSSP-IF-00247`), with a conditional
-국민안전24 HTML fallback used only when the API has a hard failure in the same
-poll cycle, deduplicates them locally, and delivers them to Telegram with a
-**human-first** template workflow: an operator always picks the template,
-previews the rendered draft, and explicitly confirms before anything counts
-as a final result. See `docs/service_v1.md` for the full product
-description, `docs/live_source_migration_mois_api_plan.md` and
-`docs/mois_api_contract_confirmed.md` for the live-source contract, and
-`docs/part1_completion_report.md` for what was actually run and verified.
+**Monitor Seoul disaster alerts, review them in Telegram, and publish with human approval.**
 
-The previous Seoul SafeCity `JSESSIONID`/XHR collector is retired as of
-**v0.5.0** — see `docs/source_discovery.md` (marked RETIRED) and
-`docs/source_cutover_runbook.md`.
+A local Python service that collects Seoul-targeted 재난문자 (disaster SMS) from official government sources, deduplicates them in SQLite, and delivers them to authorized operators via Telegram. Every outbound message goes through a **human-first** workflow: pick a template, preview, then explicitly confirm.
 
-No automatic template selection, no automatic publishing anywhere, no X
-posting, no server/VPS deployment yet (see "Known limitations" below and
-`docs/local_runtime.md`).
+| | |
+|---|---|
+| **Version** | 0.5.0 |
+| **License** | MIT |
+| **Runtime** | Python 3.11+, local machine (no VPS required) |
+| **Primary source** | [MOIS SafetyData API](https://www.safetydata.go.kr/disaster-data/view?dataSn=228) (`DSSP-IF-00247`) |
+| **Fallback** | 국민안전24 HTML (only on primary API hard failure, same poll cycle) |
 
-Since **v0.4.0** every authorized operator is an equal, independent entity:
-the shared collector (MOIS API / SafeKorea fallback since v0.5.0) and
-`messages` DB stay shared, but automatic delivery, commands, previews,
-decisions, AI, and mute/subscribe state are fully personal. There is no
-primary operator and no default chat — see
-`docs/independent_operator_model.md`.
+---
 
-## Setup
+## What it does
+
+```
+Government APIs          Local service              Operators (Telegram)
+─────────────────        ─────────────              ──────────────────
+MOIS SafetyData API  →   Poll + dedupe (SQLite)  →  Personal alert delivery
+SafeKorea HTML (*)   →   Template engine         →  Select → Preview → Confirm
+                         Retention + audit log   →  Optional AI slot fill
+```
+
+(\*) Fallback runs only when the primary API fails in the same poll cycle — not on empty results.
+
+**Design principles**
+
+- **Human in the loop** — no auto-selected templates, no auto-publishing, no silent confirmations.
+- **Independent operators** — each authorized user gets their own delivery, commands, previews, and mute state. No primary/sub-operator model.
+- **Deterministic templates** — rule-based scoring and YAML rendering; optional OpenAI slot extraction only when an operator clicks “AI로 작성”.
+- **Fail-safe defaults** — `TELEGRAM_SEND_ENABLED=false` by default; `.env` is never committed.
+
+---
+
+## Quick start
+
+### 1. Install
 
 ```bash
+git clone https://github.com/suengj/seoul-news-tracking.git
+cd seoul-news-tracking
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env   # then fill in TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USER_IDS
+cp .env.example .env
 ```
 
-`.env` is never committed (see `.gitignore`). See `docs/telegram_setup.md`
-for how to obtain a bot token. On-demand AI extraction
-(`AI_ENABLED`/`OPENAI_API_KEY`) is optional and off by default — see
-"On-demand AI" below.
+### 2. Configure `.env`
 
-`TELEGRAM_ALLOWED_USER_IDS` are the operators; each starts their own personal
-automatic delivery simply by messaging the bot in a private chat (or with
-`/subscribe`). `TELEGRAM_SEND_ENABLED` is the global master switch for all
-automatic delivery. `TELEGRAM_CHAT_ID` is **legacy migration/bootstrap only** —
-it is no longer the automatic target and is never an interactive fallback.
-Every command and button is private-chat only and always replies to the chat
-it came from — see `docs/independent_operator_model.md`,
-`docs/service_v1.md`, and `docs/telegram_routing_validation.md`. Current
-version: see `docs/versioning.md` (also shown in `/status` and the bot's
-startup log).
+| Variable | Required | Notes |
+|----------|----------|-------|
+| `TELEGRAM_BOT_TOKEN` | Yes | From [@BotFather](https://t.me/BotFather) |
+| `TELEGRAM_ALLOWED_USER_IDS` | Yes | Comma-separated Telegram **user** IDs (operators) |
+| `SAFETYDATA_SERVICE_KEY` | Yes | [SafetyData Open API](https://www.safetydata.go.kr/) service key |
+| `TELEGRAM_SEND_ENABLED` | — | `false` until you are ready to deliver alerts |
+| `OPENAI_API_KEY` | — | Optional; only for on-demand AI slot extraction |
 
-## Commands
+See [`docs/telegram_setup.md`](docs/telegram_setup.md) for token and chat ID setup.
+
+### 3. First run
 
 ```bash
-# Read-only, secret-safe contract inspection (requires SAFETYDATA_SERVICE_KEY
-# in .env). Run before any live-source change; never guesses the contract.
-python -m app.commands.inspect_mois_api
-python -m app.commands.inspect_safekorea_fallback
-
-# Explicit, idempotent source cutover: registers the currently-visible
-# MOIS/SafeKorea window as a known baseline so migrating an existing
-# database never resends historical messages. Required once before the
-# Poller will deliver on a pre-existing (non-empty) database.
-python -m app.commands.source_cutover_mois --inspect
-python -m app.commands.source_cutover_mois --bootstrap
-
-# First run only (fresh database): store current records as a non-notifying baseline.
+# Fresh database: register current messages as baseline (no Telegram send)
 python -m app.commands.establish_baseline
 
-# One poll cycle: --dry-run previews only; --send stores + delivers via the
-# template-selection flow (see below).
-python -m app.commands.poll_once --dry-run
-python -m app.commands.poll_once --send
-
-# The full local runtime: one recurring poller (POLL_INTERVAL_SECONDS,
-# default 300s) + one unified Telegram bot process, together, until Ctrl+C.
+# Start poller + Telegram bot (default poll interval: 300s)
 python -m app.commands.run_local
-
-# Offline routing / source-pipeline validation (no network)
-python -m app.commands.validate_telegram_behavior
-python -m app.commands.validate_source_pipeline
-
-# Template workbook sync
-python -m app.commands.sync_templates_from_excel --check
-python -m app.commands.sync_templates_from_excel --write
-
-# Or run either piece on its own:
-python -m app.commands.run_poller
-python -m app.commands.run_telegram_bot
-
-# Local-only admin control of the SHARED collector (MOIS API / SafeKorea
-# fallback since v0.5.0). This is the only explicit shared-poller control; it
-# is NOT a Telegram command and is not exposed via /help. `pause` here stops
-# collection for everyone (not a personal mute). Useful to re-enable a
-# collector left paused by a legacy pre-v0.4.0 Telegram /pause after
-# migrating an older database, or to pause before a source cutover.
-python -m app.commands.poller_control status
-python -m app.commands.poller_control resume
-python -m app.commands.poller_control pause
-
-# Database size/health, and manual retention cleanup.
-python -m app.commands.database_status
-python -m app.commands.cleanup_database --dry-run
-python -m app.commands.cleanup_database --confirm
-
-# Controlled Telegram connectivity test (never a real disaster message).
-python -m app.commands.send_telegram_test --confirm
 ```
 
-See `docs/local_runtime.md` for the poller/bot process model, personal
-mute/subscribe (`/pause` and `/resume` are personal `/mute`/`/unmute`
-aliases), and SQLite concurrency details. The shared collector is
-controlled only by the local `poller_control` command above — Telegram
-commands never start/stop collection for other operators, and `/status` never
-exposes who paused the shared collector (v0.4.1). Automatic retry deliveries
-are filtered by the current `TELEGRAM_ALLOWED_USER_IDS`, so a removed user is
-never retried.
+Operators message the bot in a **private chat** to subscribe. Set `TELEGRAM_SEND_ENABLED=true` when you want automatic delivery to active subscriptions.
 
-### Service v1: template selection, preview, confirm/cancel/AI
-
-Every new message `poll_once` sends gets 8 equal-weight inline buttons (the
-7 templates + "📄 원문") — **no button is auto-recommended**; a rule engine
-still runs but only ever shows as a small secondary hint line. Selecting a
-template creates a preview (Rule-extracted, re-run against the original
-message every time); the operator then taps ✅ 최종 OK, ↩️ 취소, or (if
-enabled) 🤖 AI로 작성. Only ✅ 최종 OK ever writes a `template_decisions` row
-— the future automation ground truth. See `docs/service_v1.md` and
-`docs/telegram_template_flow.md` for the full flow, and
-`docs/template_engine.md` for the deterministic rule/extraction/rendering
-logic itself.
+### 4. Verify
 
 ```bash
-# Read-only wording analysis of the historical archive (never modifies it,
-# never exports the full dataset) — informs the rules, is not itself used
-# at runtime.
-python -m app.commands.analyze_template_patterns
-
-# Manually run the extraction/rendering pipeline against one message.
-python -m app.commands.test_template --message-id 42
-python -m app.commands.test_template --text "..." --region "서울특별시" \
-    --sent-at "2026-07-14T12:00:00+09:00"
-```
-
-### On-demand AI (optional, off by default)
-
-`AI_ENABLED=false` by default — the "🤖 AI로 작성" button is hidden entirely
-until both `AI_ENABLED=true` and a real `OPENAI_API_KEY` are set. When used,
-AI only extracts slots for the template the operator already picked (it
-never chooses a template, never rewrites the fixed YAML wording, never
-publishes anything) and every result is validated (declared slots only,
-evidence required and checked against the original text) before being
-rendered through the same deterministic renderer the Rule path uses. See
-`docs/service_v1.md`.
-
-### Historical backfill (separate dataset)
-
-A one-time, resumable backfill of 10,000 unique raw historical records from
-the public archive at `safetydata.go.kr`, stored in its own SQLite database
-(`data/history_raw.db`, separate from the real-time store above, never read
-by the live runtime). No filtering, classification, or rewriting — raw data
-only. See `docs/history_source_discovery.md`, `docs/history_backfill.md`,
-`docs/history_database.md`, and `docs/history_collection_report.md`.
-
-```bash
-python -m app.commands.inspect_history_source
-python -m app.commands.backfill_history --target-count 10000 --delay-seconds 1.5
-python -m app.commands.backfill_history --resume
-python -m app.commands.backfill_history --status
-python -m app.commands.validate_history_db
-python -m app.commands.export_history_sample --count 100 --output data/exports/history_sample.jsonl
-```
-
-## Tests
-
-```bash
+python -m app.commands.send_telegram_test --confirm   # needs TELEGRAM_SEND_ENABLED=true
 python -m pytest
 ```
 
-Tests run entirely against local fixtures/mocks — no live Telegram, OpenAI,
-SafetyData, 국민안전24, or (retired) Seoul SafeCity network calls. A single
-controlled live fetch/send was run separately and is recorded in
-`docs/part1_completion_report.md`.
+---
 
-## Data model
+## Operator workflow
 
-Core: `messages` (each record's `internal_id`, `source_id`,
-`sender_or_region`, `sent_at`, `original_body` verbatim, `source_url`,
-`detected_at`, `raw_hash`, `telegram_status`, `telegram_message_id`,
-`is_baseline`), `run_history`, `tombstones`, `system_state`. Since v0.4.0
-`messages.telegram_status`/`telegram_message_id` are backward-compatible
-aggregates derived from `telegram_deliveries`. See `app/models.py` and
-`app/database.py`.
+When a new alert arrives:
 
-Independent operators (v0.4.0, see `docs/independent_operator_model.md`):
-`telegram_subscriptions` (one equal, independent subscription per authorized
-operator — `active`/`muted`/`unsubscribed`), `telegram_deliveries` (one
-per-recipient automatic-delivery row per `(message, subscription)`, the source
-of truth for delivery/retry).
+1. **Receive** — original message text with 8 equal-weight template buttons (7 templates + “원문”).
+2. **Select** — tap a template; the system re-extracts slots from the original text.
+3. **Preview** — rendered draft with ✅ Confirm / ↩️ Cancel / (optional) 🤖 AI.
+4. **Confirm** — only ✅ writes the authoritative `template_decisions` record.
 
-Service v1 template flow (see `docs/service_v1.md`,
-`docs/database_retention.md`): `template_suggestions` (rule-engine hint,
-informational only), `template_actions` (one row per selection button press,
-with `interaction_chat_id`), `template_previews` (one row per shown preview —
-the addressable object confirm/cancel/AI act on, scoped to the operator+chat),
-`template_decisions` (one row per **operator+chat** for a message —
-`UNIQUE(message_id, confirmed_by, interaction_chat_id)`, `UPSERT`ed only by an
-explicit ✅ 최종 OK — the authoritative result, including an immutable snapshot
-of the source message's id/sender-region/sent-time/full body at confirmation
-time), `ai_generations` (one row per on-demand AI attempt, with
-`interaction_chat_id`, never the API key). The last three are never pruned by
-retention cleanup, even after their source `messages` row is deleted — and
-`template_decisions`' own snapshot means the full original text is never lost
-either.
+A small “실험적 추천” hint may appear, but it is never a button and never auto-selected.
 
-## Project layout
+Details: [`docs/service_v1.md`](docs/service_v1.md) · [`docs/telegram_template_flow.md`](docs/telegram_template_flow.md)
+
+---
+
+## Common commands
+
+| Command | Purpose |
+|---------|---------|
+| `python -m app.commands.run_local` | Run poller + Telegram bot together |
+| `python -m app.commands.poll_once --dry-run` | One poll cycle, no send |
+| `python -m app.commands.poll_once --send` | One poll cycle with delivery |
+| `python -m app.commands.source_cutover_mois --bootstrap` | Migrate existing DB to MOIS source (once) |
+| `python -m app.commands.poller_control status` | Shared collector pause/resume (local CLI only) |
+| `python -m app.commands.database_status` | DB size and health |
+| `python -m app.commands.sync_templates_from_excel --check` | Validate template workbook → YAML sync |
+
+Full CLI reference: [`docs/local_runtime.md`](docs/local_runtime.md) and `app/commands/`.
+
+### macOS background service (optional)
+
+Copy and edit the launchd example (paths are machine-specific, not in the repo):
+
+```bash
+cp scripts/launchd/com.user.seoulnews-runlocal.plist.example \
+   scripts/launchd/com.user.seoulnews-runlocal.plist
+# edit paths, then install — see plist header comment
+```
+
+### Template workbook (local only)
+
+The Seoul City Excel workbook (`templates/서울시_재난특보_X템플릿.xlsx`) is **gitignored** — keep your copy locally. Runtime uses the generated [`config/message_templates.yaml`](config/message_templates.yaml). Sync with:
+
+```bash
+python -m app.commands.sync_templates_from_excel --write
+```
+
+---
+
+## Project structure
 
 ```
-app/            config, models, collector, mois_api, safekorea_fallback, database, telegram_sender, poller, telegram_bot, process_lock
-app/commands/   CLI entry points
-app/future/     inactive placeholders for later work (never imported by the live runtime)
-app/history_*.py  historical backfill collector (separate dataset, see docs/history_*.md)
-app/template_rules.py, app/template_extractors.py, app/template_renderer.py
-                deterministic rule scoring / slot extraction / YAML rendering (docs/template_engine.md)
-app/template_flow.py  Service v1 orchestration: selection -> preview -> confirm/cancel/AI
-app/ai_client.py      on-demand OpenAI slot extraction (only called from template_flow)
-config/message_templates.yaml   the 7 templates + ORIGINAL_ONLY/UNKNOWN (human-managed SSOT)
-config/entity_dictionary.yaml   small helper dictionary (e.g. river names) for extraction
-docs/           product/architecture docs, source discovery, Telegram setup, completion report
-artifacts/      small sanitized evidence from source discovery (no secrets)
-tests/          fixture/mock-based tests, no live network dependency
+app/
+  mois_api.py, safekorea_fallback.py   # Live data sources (v0.5.0)
+  poller.py, telegram_bot.py           # Recurring collection + bot
+  template_flow.py                     # Select → preview → confirm flow
+  database.py, models.py               # SQLite persistence
+app/commands/                          # CLI entry points
+config/
+  message_templates.yaml               # Runtime template definitions
+  entity_dictionary.yaml               # Extraction helpers
+docs/                                  # Architecture, setup, runbooks
+tests/                                 # Fixture-based tests (no live network)
 ```
+
+---
+
+## Documentation
+
+| Topic | Doc |
+|-------|-----|
+| Product flow | [`docs/service_v1.md`](docs/service_v1.md) |
+| Local runtime & processes | [`docs/local_runtime.md`](docs/local_runtime.md) |
+| Telegram setup | [`docs/telegram_setup.md`](docs/telegram_setup.md) |
+| Independent operators | [`docs/independent_operator_model.md`](docs/independent_operator_model.md) |
+| MOIS API migration | [`docs/live_source_migration_mois_api_plan.md`](docs/live_source_migration_mois_api_plan.md) |
+| Template engine | [`docs/template_engine.md`](docs/template_engine.md) |
+| Historical backfill | [`docs/history_backfill.md`](docs/history_backfill.md) |
+
+---
 
 ## Known limitations
 
-See `docs/service_v1.md` and `docs/local_runtime.md` for the full list.
-Notably: no server/VPS deployment yet (long-polling only, single local
-SQLite file), and live AI extraction is validated with mocks only until a
-real `OPENAI_API_KEY` is supplied. Only the latest preview per
-(message, operator) is confirmable/cancellable — selecting a new template,
-or a successful AI generation, marks the prior active preview `superseded`;
-acting on a stale preview's buttons is rejected, never silently ignored
-(see `docs/telegram_template_flow.md`).
+- **Local only** — long-polling Telegram bot, single SQLite file; no VPS/cloud deployment yet.
+- **No auto-publish** — X/Twitter and other channels are placeholders under `app/future/`.
+- **Latest preview only** — acting on superseded preview buttons is rejected explicitly.
+- **Seoul filter** — only messages targeting Seoul (서울특별시) are collected.
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome. Run `python -m pytest` before submitting. Do not commit `.env`, database files, the local launchd plist, or the Seoul City Excel workbook.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).

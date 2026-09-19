@@ -55,6 +55,16 @@ It never initiates a collection request itself — it only reads/writes
 database. There is exactly one bot process; nothing else calls
 `getUpdates` for this bot token.
 
+Before the first Telegram request, `run_telegram_bot` must claim the
+two-host cutover authority described in
+[`docs/systemd_deployment.md`](systemd_deployment.md). `CUTOVER_FENCE_PATH`
+and `CUTOVER_HOST_ID` are mandatory for a real consumer; absent or invalid
+authority refuses startup. The bot holds a fence-identity file lock for its
+lifetime, derived from the token, fence path, and host id, so two local
+processes with different database paths still contend for one lock. The
+shared-filesystem requirements are documented in
+[`docs/systemd_deployment.md`](systemd_deployment.md).
+
 ## Starting things locally
 
 ```bash
@@ -81,6 +91,13 @@ to a local-only `com.user.seoulnews-runlocal.plist` (gitignored), set your
 project paths, then see the plist header comment for install/uninstall
 commands. Without this outer layer, `run_local` giving up still leaves the
 whole service down until a human restarts it manually.
+
+For the Linux systemd deployment contract, use
+[`docs/systemd_deployment.md`](systemd_deployment.md). It maps the observed
+Mac `KeepAlive=true`, `RunAtLoad=true`, and `ThrottleInterval=60` to a
+foreground systemd service with `Restart=always` and `RestartSec=60`. The Mac
+plist remains a rollback reference; the Linux contract uses journald and an
+external `EnvironmentFile`.
 
 ## Stopping locally
 
@@ -190,8 +207,9 @@ Local testing uses Telegram's `getUpdates` long polling
 callback_query alike — is processed twice, with a bounded backoff on
 transient failures. Telegram itself rejects a second concurrent
 `getUpdates` call for the same bot token with HTTP 409; `run_telegram_bot`
-also takes a local file lock (`data/run_telegram_bot.lock`) so a second
-local instance fails fast with a clear error instead of racing.
+also takes a legacy database-directory lock plus the fence-identity lock, so
+a second local instance fails fast with a clear error even when it uses a
+different database path.
 
 The offset is persisted in SQLite (`system_state.telegram_update_offset`),
 not just kept in memory — a restart (clean or crashed) resumes from the
@@ -233,10 +251,10 @@ SQLite's concurrency model assumes co-located processes on one filesystem.
 ## Limitations before server deployment
 
 - Process supervision is local-machine only (`run_local`'s own child
-  restart logic plus an optional launchd LaunchAgent around it) — no VPS,
-  no systemd, doesn't survive the machine being off, and a LaunchAgent
-  specifically only runs while the user is logged in (use a LaunchDaemon
-  instead if it must run without any user session).
+  restart logic plus a platform supervisor around it). The repository now
+  includes a source-only systemd contract for Linux and retains the launchd
+  example for macOS; deployment authority still owns installation and service
+  lifecycle.
 - No Cloudflare Worker, no cron, no public webhook.
 - Long polling only; see the webhook migration note above.
 - SQLite is a single local file; see the D1/PostgreSQL migration note above.

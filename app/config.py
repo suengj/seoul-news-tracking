@@ -109,6 +109,12 @@ class Settings:
 
     local_shutdown_command_enabled: bool
 
+    # Explicit, deployment-supplied labels for the operator-facing /status
+    # identity. These deliberately have no hostname/environment auto-detect
+    # fallback: an unset deployment is reported as unconfigured.
+    deployment_label: str = "unconfigured"
+    runtime_mode: str = "unconfigured"
+
     history_database_path: Path = Path("data/history_raw.db")
     history_request_delay_seconds: float = 1.5
     history_request_timeout_seconds: float = 20.0
@@ -139,6 +145,12 @@ class Settings:
     safekorea_request_timeout_seconds: float = 15.0
     safekorea_max_pages: int = 10
     safekorea_request_delay_seconds: float = 0.3
+
+    # Cross-host Telegram getUpdates cutover fence.  These are deliberately
+    # unset by default: a deployment without an explicit shared authority
+    # path and host identity must refuse to start the consumer.
+    cutover_fence_path: Path | None = None
+    cutover_host_id: str = "unconfigured"
 
     @property
     def telegram_configured(self) -> bool:
@@ -187,6 +199,11 @@ def load_settings(env_file: Path | None = None) -> Settings:
             f"{HISTORY_REQUEST_DELAY_MIN} and {HISTORY_REQUEST_DELAY_MAX}"
         )
 
+    cutover_fence_path_raw = os.environ.get("CUTOVER_FENCE_PATH", "").strip()
+    cutover_fence_path = Path(cutover_fence_path_raw) if cutover_fence_path_raw else None
+    if cutover_fence_path is not None and not cutover_fence_path.is_absolute():
+        cutover_fence_path = PROJECT_ROOT / cutover_fence_path
+
     return Settings(
         telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID", ""),
@@ -230,6 +247,8 @@ def load_settings(env_file: Path | None = None) -> Settings:
         local_shutdown_command_enabled=_parse_bool(
             os.environ.get("LOCAL_SHUTDOWN_COMMAND_ENABLED", "false")
         ),
+        deployment_label=os.environ.get("DEPLOYMENT_LABEL", "unconfigured"),
+        runtime_mode=os.environ.get("RUNTIME_MODE", "unconfigured"),
         history_database_path=history_database_path,
         history_request_delay_seconds=history_request_delay_seconds,
         history_request_timeout_seconds=float(
@@ -278,4 +297,6 @@ def load_settings(env_file: Path | None = None) -> Settings:
             os.environ.get("SAFEKOREA_REQUEST_DELAY_SECONDS", "0.3"),
             SAFEKOREA_REQUEST_DELAY_SECONDS_RANGE,
         ),
+        cutover_fence_path=cutover_fence_path,
+        cutover_host_id=os.environ.get("CUTOVER_HOST_ID", "unconfigured"),
     )

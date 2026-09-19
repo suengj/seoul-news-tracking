@@ -30,6 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from app.config import load_settings
+from app.cutover_fence import FENCE_REFUSAL_EXIT_CODE
 from app.logging_config import configure_logging
 from app.process_lock import SingleInstanceLock
 
@@ -141,6 +142,12 @@ def _check_children(
         logger.error(
             "%s exited unexpectedly with code %s after %.1fs uptime", name, rc, uptime
         )
+        if name == "telegram_bot" and rc == FENCE_REFUSAL_EXIT_CODE:
+            logger.error(
+                "telegram_bot refused the cutover fence; stopping without respawning "
+                "a consumer that has no authority"
+            )
+            return False
         tracker = trackers[name]
         backoff = tracker.next_backoff_or_give_up()
         if backoff is None:

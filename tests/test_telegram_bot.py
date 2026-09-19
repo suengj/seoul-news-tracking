@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 import pytest
@@ -8,7 +9,7 @@ import pytest
 import app.telegram_bot as telegram_bot
 from app.database import Database
 from app.telegram_bot import TelegramBotRunner, TelegramPollError
-from app.telegram_sender import TelegramSender
+from app.telegram_sender import TelegramSender, escape_markdown_v2
 from app.template_flow import build_initial_alert
 
 
@@ -44,6 +45,11 @@ def _message_update(update_id, user_id, text, *, chat_id=555, message_id=None, c
             "text": text,
         },
     }
+
+
+def _decode_markdown_v2(text: str) -> str:
+    """Approximate Telegram's rendered text for escaped MarkdownV2 values."""
+    return re.sub(r"\\([_\*\[\]\(\)~`>#+\-=|{}.!\\])", r"\1", text)
 
 
 # -- authorization -----------------------------------------------------------
@@ -203,20 +209,97 @@ def test_status_command_active(make_settings, db):
     assert "상태" in sent[0]["text"]
 
 
+def test_status_reports_explicit_runtime_identity(make_settings, db):
+    settings = make_settings(
+        telegram_allowed_user_ids=(111,),
+        deployment_label="linux-production",
+        runtime_mode="systemd",
+    )
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+
+    bot.dispatch(_message_update(1, user_id=111, text="/status"))
+
+    assert escape_markdown_v2("배포: linux-production") in sent[0]["text"]
+    assert "실행 모드: systemd" in sent[0]["text"]
+
+
+def test_stauts_is_status_compatibility_alias(make_settings, db):
+    settings = make_settings(telegram_allowed_user_ids=(111,))
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+
+    status_outcome = bot.dispatch(_message_update(1, user_id=111, text="/status"))
+    alias_outcome = bot.dispatch(_message_update(2, user_id=111, text="/stauts"))
+
+    assert status_outcome.command == "/status"
+    assert alias_outcome.command == "/stauts"
+    assert sent[0]["text"] == sent[1]["text"]
+    assert "공통 수집 상태" in sent[1]["text"]
+
+
+def test_stauts_keeps_status_authorization_and_private_chat_rules(make_settings, db):
+    settings = make_settings(telegram_allowed_user_ids=(111,))
+    sent = []
+    bot = make_bot(settings, db, _record_handler(sent))
+
+    unauthorized = bot.dispatch(_message_update(1, user_id=999, text="/stauts"))
+    group = bot.dispatch(
+        _message_update(2, user_id=111, text="/stauts", chat_id=-400, chat_type="supergroup")
+    )
+
+    assert unauthorized.authorized is False
+    assert "공통 수집 상태" not in sent[0]["text"]
+    assert group.authorized is True
+    assert "개인 채팅" in sent[1]["text"]
+    assert db.subscription_status_for(111) == "none"
+
+
 def test_status_does_not_leak_secrets_or_paths(make_settings, db, tmp_path):
     settings = make_settings(
         telegram_allowed_user_ids=(111,),
         telegram_bot_token="SUPER_SECRET_TOKEN_VALUE",
+        telegram_chat_id="TELEGRAM_CHAT_ID_SECRET",
+        openai_api_key="OPENAI_API_KEY_SECRET",
+        safetydata_service_key="SAFETYDATA_SERVICE_KEY_SECRET",
         database_path=tmp_path / "secret_dir" / "seoul_news.db",
+        deployment_label="203.0.113.7",
+        runtime_mode="SUPER_SECRET_TOKEN_VALUE",
+    )
+    db.record_poll_error(
+        "Traceback (most recent call last): secret=STACK_TRACE_SECRET "
+        "/srv/private/host-detail.db 203.0.113.7"
+    )
+    db.record_collection_source(
+        method="/srv/private/collector-internal",
+        primary_error_category="SERVICE_KEY_SECRET",
     )
     sent = []
     bot = make_bot(settings, db, _record_handler(sent))
     bot.dispatch(_message_update(1, user_id=111, text="/status"))
-    text = sent[0]["text"]
-    assert "SUPER_SECRET_TOKEN_VALUE" not in text
-    assert str(settings.database_path) not in text
-    assert "secret_dir" not in text
-    assert "TEST_CHAT" not in text
+    wire_text = sent[0]["text"]
+    rendered_text = _decode_markdown_v2(wire_text)
+    forbidden_values = (
+        "SUPER_SECRET_TOKEN_VALUE",
+        "TELEGRAM_CHAT_ID_SECRET",
+        "OPENAI_API_KEY_SECRET",
+        "SAFETYDATA_SERVICE_KEY_SECRET",
+        str(settings.database_path),
+        "secret_dir",
+        "STACK_TRACE_SECRET",
+        "/srv/private/host-detail.db",
+        "203.0.113.7",
+        "SERVICE_KEY_SECRET",
+        "/srv/private/collector-internal",
+        "111",
+        "555",
+        "TELEGRAM_CHAT_ID",
+        ".env",
+    )
+    for forbidden in forbidden_values:
+        assert forbidden not in rendered_text
+    assert "배포: unconfigured" in rendered_text
+    assert "실행 모드: unconfigured" in rendered_text
 
 
 # -- /pause and /resume --------------------------------------------------------
@@ -415,6 +498,8 @@ def test_help_command(make_settings, db):
     bot = make_bot(settings, db, _record_handler(sent))
     bot.dispatch(_message_update(1, user_id=111, text="/help"))
     assert "latest" in sent[0]["text"]
+    assert "/status" in sent[0]["text"]
+    assert "/stauts" in sent[0]["text"]
 
 
 def test_help_does_not_expose_local_admin_poller_control(make_settings, db):

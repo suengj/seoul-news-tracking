@@ -30,7 +30,9 @@ The two communicate only through the shared SQLite tables.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -82,6 +84,7 @@ HELP_TEXT = escape_markdown_v2(
     "/latest - 가장 최근 재난문자 조회\n"
     "/history - 최근 재난문자 10건 선택\n"
     "/status - 내 알림 상태 및 공통 수집 상태 조회\n"
+    "/stauts - /status 호환 별칭\n"
     "\n"
     "[내 알림 설정]\n"
     "/subscribe - 이 개인 채팅으로 자동 알림 수신 시작\n"
@@ -140,6 +143,47 @@ _SOURCE_METHOD_LABEL = {
     "safekorea_html_fallback": "국민안전24 fallback",
     "none": "수집 실패 (원천 없음)",
 }
+_SOURCE_ERROR_LABEL = {
+    "auth_failed": "인증 실패",
+    "http_error": "HTTP 오류",
+    "rate_limited": "요청 제한",
+    "schema_error": "응답 형식 오류",
+    "timeout": "시간 초과",
+    "unknown": "알 수 없는 오류",
+}
+
+_SAFE_RUNTIME_IDENTITY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
+_SENSITIVE_RUNTIME_IDENTITY_RE = re.compile(
+    r"(?i)(?:token|secret|api[_-]?key|password|credential|private|chat[_-]?id|"
+    r"^sk[-_]|^xox[baprs]-|^gh[pousr]_)"
+)
+
+
+def _safe_runtime_identity(value: str) -> str:
+    """Return a short non-sensitive operator label.
+
+    Runtime identity is an informational display field, not a general
+    configuration echo. Restricting its grammar also excludes IP addresses,
+    paths, and common credential-shaped labels before Markdown escaping.
+    """
+    candidate = str(value).strip()
+    if (
+        not candidate
+        or len(candidate) > 64
+        or any(ord(char) < 32 for char in candidate)
+        or "/" in candidate
+        or "\\" in candidate
+        or not _SAFE_RUNTIME_IDENTITY_RE.fullmatch(candidate)
+        or _SENSITIVE_RUNTIME_IDENTITY_RE.search(candidate)
+    ):
+        return "unconfigured"
+    try:
+        ipaddress.ip_address(candidate)
+    except ValueError:
+        pass
+    else:
+        return "unconfigured"
+    return candidate
 
 
 def _format_iso(value: str | None) -> str | None:
@@ -181,12 +225,18 @@ def build_status_reply(
         sent_ts = _format_iso(latest["sent_at"]) if latest is not None else None
         lines.append(escape_markdown_v2(f"최근 자동 발송: {sent_ts if sent_ts else '없음'}"))
         if latest is not None and latest["status"] == "failed":
-            lines.append(escape_markdown_v2(f"최근 발송 오류: {latest['error'] or '오류'}"))
+            # Delivery errors can originate in an HTTP response and are not a
+            # safe operator-facing diagnostic surface. Keep /status generic.
+            lines.append(escape_markdown_v2("최근 발송 오류: 있음"))
         else:
             lines.append(escape_markdown_v2("최근 발송 오류: 없음"))
 
     lines.append("")
     lines.append("\\[공통 수집 상태\\]")
+    lines.append(
+        escape_markdown_v2(f"배포: {_safe_runtime_identity(settings.deployment_label)}")
+    )
+    lines.append(escape_markdown_v2(f"실행 모드: {_safe_runtime_identity(settings.runtime_mode)}"))
     lines.append(escape_markdown_v2(f"버전: {get_version()}"))
 
     if not state.polling_enabled:
@@ -225,24 +275,21 @@ def build_status_reply(
     # v0.5.0 source observability (see docs/live_source_migration_mois_api_plan.md
     # §14). Never shows the service key, a request URL/query string, or the
     # message body — only the source label and a short sanitized error category.
-    source_label = _SOURCE_METHOD_LABEL.get(
-        state.last_collection_source, state.last_collection_source
-    )
+    source_label = _SOURCE_METHOD_LABEL.get(state.last_collection_source, "알 수 없음")
     lines.append(escape_markdown_v2(f"최근 수집 원천: {source_label if source_label else '없음'}"))
     lines.append(
         escape_markdown_v2(
-            f"Primary 최근 오류: {state.last_primary_error_category if state.last_primary_error_category else '없음'}"
+            "Primary 최근 오류: "
+            f"{_SOURCE_ERROR_LABEL.get(state.last_primary_error_category, '알 수 없음') if state.last_primary_error_category else '없음'}"
         )
     )
 
     lines.append(escape_markdown_v2(f"저장된 문자: {report['total_messages']}건"))
     lines.append(escape_markdown_v2(f"DB 보관기간: {settings.message_retention_days}일"))
     lines.append(escape_markdown_v2(f"실행이력 보관기간: {settings.run_history_retention_days}일"))
-    lines.append(
-        escape_markdown_v2(
-            f"최근 오류: {state.last_poll_error if state.last_poll_error else '없음'}"
-        )
-    )
+    # last_poll_error is retained for local administrative diagnostics, but it
+    # may contain an exception message, URL, path, or other host detail.
+    lines.append(escape_markdown_v2(f"최근 오류: {'있음' if state.last_poll_error else '없음'}"))
 
     return "\n".join(lines)
 
@@ -484,7 +531,7 @@ class TelegramBotRunner:
         if command == "/history":
             self._send_history(chat_id)
             return None
-        if command == "/status":
+        if command in ("/status", "/stauts"):
             return build_status_reply(self.db, self.settings, user_id=user_id, chat_id=chat_id)
         if command == "/subscribe":
             return self._handle_subscribe(user_id, chat_id)

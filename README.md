@@ -105,6 +105,8 @@ Details: [`docs/service_v1.md`](docs/service_v1.md) · [`docs/telegram_template_
 | `python -m app.commands.poll_once --send` | One poll cycle with delivery |
 | `python -m app.commands.source_cutover_mois --bootstrap` | Migrate existing DB to MOIS source (once) |
 | `python -m app.commands.poller_control status` | Shared collector pause/resume (local CLI only) |
+| `python -m app.commands.cutover_fence request ...` | Begin an explicit two-host Telegram hand-off |
+| `python -m app.commands.cutover_fence confirm-off ...` | Record positive outgoing-host OFF evidence |
 | `python -m app.commands.database_status` | DB size and health |
 | `python -m app.commands.sync_templates_from_excel --check` | Validate template workbook → YAML sync |
 
@@ -119,6 +121,11 @@ cp scripts/launchd/com.user.seoulnews-runlocal.plist.example \
    scripts/launchd/com.user.seoulnews-runlocal.plist
 # edit paths, then install — see plist header comment
 ```
+
+The launchd plist is retained as a macOS rollback reference. For the Linux
+deployment contract, including the non-root systemd unit, external state and
+secrets, journald logs, reboot persistence, and the cross-host duplicate-polling
+cutover fence, see [`docs/systemd_deployment.md`](docs/systemd_deployment.md).
 
 ### Template workbook (local only)
 
@@ -156,6 +163,7 @@ tests/                                 # Fixture-based tests (no live network)
 | Local runtime & processes | [`docs/local_runtime.md`](docs/local_runtime.md) |
 | Telegram setup | [`docs/telegram_setup.md`](docs/telegram_setup.md) |
 | Independent operators | [`docs/independent_operator_model.md`](docs/independent_operator_model.md) |
+| Linux systemd deployment | [`docs/systemd_deployment.md`](docs/systemd_deployment.md) |
 | MOIS API migration | [`docs/live_source_migration_mois_api_plan.md`](docs/live_source_migration_mois_api_plan.md) |
 | Template engine | [`docs/template_engine.md`](docs/template_engine.md) |
 | Historical backfill | [`docs/history_backfill.md`](docs/history_backfill.md) |

@@ -43,6 +43,7 @@ HOST_STATE_KIND = "telegram-getupdates-host-state"
 PHASE_REQUESTED = "REQUESTED"
 PHASE_OFF_RECORDED = "OFF_RECORDED"
 PHASE_ACTIVE = "ACTIVE"
+OFF_CONFIRMATION_FACT = "local getUpdates consumer positively confirmed stopped"
 
 _HOST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -81,6 +82,14 @@ def _parse_timestamp(value: Any, *, code: str) -> datetime:
     if parsed.tzinfo is None:
         raise CutoverFenceError(code, "timestamp has no timezone")
     return parsed.astimezone(UTC)
+
+
+def _check_schema_version(value: Any, *, code: str, record_name: str) -> None:
+    if type(value) is not int or value != FENCE_SCHEMA_VERSION:
+        raise CutoverFenceError(
+            code,
+            f"unsupported {record_name} schema; schema_version must be integer {FENCE_SCHEMA_VERSION}",
+        )
 
 
 def _require_host_id(value: str, *, field: str = "host id") -> str:
@@ -286,8 +295,11 @@ class CutoverFenceStore:
         )
 
     def _check_common_authority(self, record: dict[str, Any]) -> None:
-        if record.get("schema_version") != FENCE_SCHEMA_VERSION:
-            raise CutoverFenceError("AUTHORITY_MALFORMED", "unsupported authority schema")
+        _check_schema_version(
+            record.get("schema_version"),
+            code="AUTHORITY_MALFORMED",
+            record_name="authority",
+        )
         if record.get("kind") != AUTHORITY_KIND:
             raise CutoverFenceError("AUTHORITY_MALFORMED", "wrong authority record kind")
         if record.get("token_fingerprint") != self.token_digest:
@@ -309,16 +321,21 @@ class CutoverFenceStore:
         _parse_timestamp(record.get("issued_at"), code="AUTHORITY_MALFORMED")
 
     def _check_expiry(self, record: dict[str, Any]) -> None:
+        issued_at = _parse_timestamp(record.get("issued_at"), code="AUTHORITY_MALFORMED")
         expires_at = _parse_timestamp(record.get("expires_at"), code="AUTHORITY_MALFORMED")
-        now = self._now()
-        if expires_at <= now:
-            raise CutoverFenceError("AUTHORITY_EXPIRED", "cutover evidence is stale")
-        if expires_at - _parse_timestamp(
-            record["issued_at"], code="AUTHORITY_MALFORMED"
-        ) > timedelta(seconds=FENCE_TTL_SECONDS):
+        if expires_at <= issued_at:
+            raise CutoverFenceError(
+                "AUTHORITY_MALFORMED", "authority lifetime must end after it is issued"
+            )
+        if expires_at - issued_at > timedelta(seconds=FENCE_TTL_SECONDS):
             raise CutoverFenceError(
                 "AUTHORITY_MALFORMED", "authority lifetime exceeds the fence TTL"
             )
+        now = self._now()
+        if issued_at > now:
+            raise CutoverFenceError("AUTHORITY_MALFORMED", "authority was issued in the future")
+        if expires_at <= now:
+            raise CutoverFenceError("AUTHORITY_EXPIRED", "cutover evidence is stale")
 
     def _read_host_state(self, host_id: str) -> dict[str, Any]:
         return _read_json(
@@ -336,8 +353,11 @@ class CutoverFenceStore:
         require_off: bool,
         require_fresh: bool = True,
     ) -> None:
-        if state.get("schema_version") != FENCE_SCHEMA_VERSION:
-            raise CutoverFenceError("OFF_READBACK_MALFORMED", "unsupported host-state schema")
+        _check_schema_version(
+            state.get("schema_version"),
+            code="OFF_READBACK_MALFORMED",
+            record_name="host-state",
+        )
         if state.get("kind") != HOST_STATE_KIND:
             raise CutoverFenceError("OFF_READBACK_MALFORMED", "wrong host-state record kind")
         if state.get("token_fingerprint") != self.token_digest:
@@ -499,7 +519,7 @@ class CutoverFenceStore:
             "host_id": self.host_id,
             "request_id": request_id,
             "observed_at": _timestamp(observed_at),
-            "fact": "local getUpdates consumer positively confirmed stopped",
+            "fact": OFF_CONFIRMATION_FACT,
         }
         self._atomic_write(self.authority_path, record)
 
@@ -533,6 +553,55 @@ class CutoverFenceStore:
         )
         return state
 
+    def _check_off_evidence(self, record: dict[str, Any]) -> datetime:
+        """Validate the authority OFF fact and its independent read-back."""
+        outgoing_off = record.get("outgoing_off")
+        if not isinstance(outgoing_off, dict):
+            raise CutoverFenceError(
+                "AUTHORITY_OFF_FACT_MISSING", "authority has no positive OFF fact"
+            )
+        if outgoing_off.get("host_id") != record["outgoing_host"]:
+            raise CutoverFenceError(
+                "AUTHORITY_OFF_FACT_MALFORMED", "OFF fact names the wrong host"
+            )
+        if outgoing_off.get("request_id") != record["request_id"]:
+            raise CutoverFenceError(
+                "AUTHORITY_OFF_FACT_MALFORMED", "OFF fact names the wrong request"
+            )
+        if "fact" not in outgoing_off:
+            raise CutoverFenceError(
+                "AUTHORITY_OFF_FACT_MISSING", "authority has no positive OFF fact"
+            )
+        if outgoing_off["fact"] != OFF_CONFIRMATION_FACT:
+            raise CutoverFenceError(
+                "AUTHORITY_OFF_FACT_MALFORMED", "OFF fact is not a positive confirmation"
+            )
+
+        off_observed_at = _parse_timestamp(
+            outgoing_off.get("observed_at"), code="AUTHORITY_OFF_FACT_MALFORMED"
+        )
+        issued_at = _parse_timestamp(record.get("issued_at"), code="AUTHORITY_OFF_FACT_MALFORMED")
+        if off_observed_at < issued_at:
+            raise CutoverFenceError(
+                "AUTHORITY_OFF_FACT_MALFORMED",
+                "OFF evidence predates the authority issue time",
+            )
+
+        # This is the independent read-back: a fresh read of a separate
+        # host-state record, not a trust decision based on authority.json.
+        outgoing_state = self.read_back_off(
+            host_id=record["outgoing_host"], request_id=record["request_id"]
+        )
+        readback_observed_at = _parse_timestamp(
+            outgoing_state.get("observed_at"), code="OFF_READBACK_MALFORMED"
+        )
+        if readback_observed_at != off_observed_at:
+            raise CutoverFenceError(
+                "OFF_READBACK_TIMESTAMP_MISMATCH",
+                "authority OFF and independent OFF read-back timestamps differ",
+            )
+        return off_observed_at
+
     def _check_active_artifact(self, record: dict[str, Any]) -> None:
         """Validate every durable fact required for same-host restart."""
         try:
@@ -556,7 +625,7 @@ class CutoverFenceStore:
         active_since = _parse_timestamp(
             record.get("active_since"), code="ACTIVE_ARTIFACT_MALFORMED"
         )
-        if active_since < issued_at or active_since > self._now():
+        if active_since < issued_at or active_since > expires_at or active_since > self._now():
             raise CutoverFenceError(
                 "ACTIVE_ARTIFACT_MALFORMED", "ACTIVE authority timestamp is inconsistent"
             )
@@ -569,8 +638,7 @@ class CutoverFenceStore:
         if (
             outgoing_off.get("host_id") != record["outgoing_host"]
             or outgoing_off.get("request_id") != record["request_id"]
-            or outgoing_off.get("fact")
-            != "local getUpdates consumer positively confirmed stopped"
+            or outgoing_off.get("fact") != OFF_CONFIRMATION_FACT
         ):
             raise CutoverFenceError(
                 "ACTIVE_ARTIFACT_MALFORMED", "ACTIVE authority OFF fact is inconsistent"
@@ -617,6 +685,10 @@ class CutoverFenceStore:
             raise CutoverFenceError(
                 "ACTIVE_ARTIFACT_MALFORMED", "ACTIVE authority does not match active read-back"
             )
+        # The same expiry and issue-time checks apply to a restart as to the
+        # initial claim.  The active timestamp check above supplies the
+        # remaining adjacent relation in the transition chronology.
+        self._check_expiry(record)
 
     def claim(self) -> dict[str, Any]:
         """Atomically consume a valid hand-off for this host before polling."""
@@ -681,36 +753,30 @@ class CutoverFenceStore:
                 )
 
             self._check_expiry(record)
-            outgoing_off = record.get("outgoing_off")
-            if not isinstance(outgoing_off, dict):
-                raise CutoverFenceError(
-                    "AUTHORITY_OFF_FACT_MISSING", "authority has no positive OFF fact"
-                )
-            if outgoing_off.get("host_id") != record["outgoing_host"]:
-                raise CutoverFenceError(
-                    "AUTHORITY_OFF_FACT_MALFORMED", "OFF fact names the wrong host"
-                )
-            if outgoing_off.get("request_id") != record["request_id"]:
-                raise CutoverFenceError(
-                    "AUTHORITY_OFF_FACT_MALFORMED", "OFF fact names the wrong request"
-                )
-            _parse_timestamp(outgoing_off.get("observed_at"), code="AUTHORITY_OFF_FACT_MALFORMED")
-
-            # This is the independent read-back: a fresh read of a separate
-            # host-state record, not a trust decision based on authority.json.
-            self.read_back_off(host_id=record["outgoing_host"], request_id=record["request_id"])
+            off_observed_at = self._check_off_evidence(record)
 
             claimed = dict(record)
             claimed["phase"] = PHASE_ACTIVE
             claimed["active_host"] = self.host_id
             claimed["active_since"] = _timestamp(self._now())
+            active_since = _parse_timestamp(
+                claimed["active_since"], code="ACTIVE_ARTIFACT_MALFORMED"
+            )
+            if active_since < off_observed_at:
+                raise CutoverFenceError(
+                    "AUTHORITY_OFF_FACT_MALFORMED",
+                    "claim time predates the outgoing OFF evidence",
+                )
             # Publish the incoming ACTIVE read-back before the authority
             # transition.  A durable ACTIVE record therefore always has both
             # host-state records required by the same-host restart branch.
             self._write_host_state(
                 claimed,
                 state="ACTIVE",
-                observed_at=_parse_timestamp(claimed["active_since"], code="AUTHORITY_MALFORMED"),
+                observed_at=active_since,
             )
+            # Validate the exact artifact that will be acknowledged as ACTIVE;
+            # this keeps entry and same-host restart validation canonical.
+            self._check_active_artifact(claimed)
             self._atomic_write(self.authority_path, claimed)
             return claimed

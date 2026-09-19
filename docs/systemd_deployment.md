@@ -128,11 +128,13 @@ repaired local consumer holding that lock makes OFF recording fail. The
 incoming `run_telegram_bot` process freshly reads both the authority record and
 the outgoing host's separate state record before its first Telegram request.
 The two records must bind the same bot-token fingerprint, request id, host,
-and fresh timestamp. This separate host-state read is the independent
-read-back: a successful write of `authority.json` alone cannot authorize a
-consumer. A same-host restart also requires the complete durable ACTIVE
-artifact: valid OFF and ACTIVE host-state records, matching timestamps and
-identities, the original bounded lifetime fields, and the positive OFF fact.
+and matching fresh timestamp. The complete transition chronology is
+`issued_at <= outgoing OFF observed_at == outgoing host read-back observed_at <= active_since == incoming ACTIVE read-back observed_at <= validation time < expires_at`,
+with a lifetime no longer than the fence TTL. This separate host-state read is
+the independent read-back: a successful write of `authority.json` alone cannot
+authorize a consumer. A same-host restart also requires the complete durable
+ACTIVE artifact: valid OFF and ACTIVE host-state records, matching timestamps
+and identities, the original bounded lifetime fields, and the positive OFF fact.
 A missing, stale, malformed, expired, wrong-host, ACTIVE, or in-progress
 record refuses with a stable `CUTOVER_FENCE_REFUSED[...]` reason.
 

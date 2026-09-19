@@ -46,6 +46,159 @@ def test_positive_cutover_requires_off_fact_and_independent_readback(fence_pair)
     assert claimed["active_host"] == "linux"
     assert claimed["outgoing_off"]["host_id"] == "mac"
     assert claimed["outgoing_off"]["observed_at"]
+    # The artifact acknowledged at entry must also be accepted by the
+    # same-host restart validator.
+    assert linux.claim() == claimed
+
+
+def test_same_host_restart_refuses_active_timestamp_after_expiry(fence_pair):
+    mac, linux, clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="active-after-expiry"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    linux.claim()
+
+    authority_path = linux.authority_path
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    late_active = BASE_TIME + timedelta(seconds=FENCE_TTL_SECONDS + 40)
+    authority["active_since"] = late_active.isoformat()
+    authority_path.write_text(json.dumps(authority), encoding="utf-8")
+    incoming_state_path = linux.host_state_path("linux")
+    incoming_state = json.loads(incoming_state_path.read_text(encoding="utf-8"))
+    incoming_state["observed_at"] = late_active.isoformat()
+    incoming_state_path.write_text(json.dumps(incoming_state), encoding="utf-8")
+    clock[0] = late_active + timedelta(seconds=1)
+
+    assert_refused(linux.claim, "ACTIVE_ARTIFACT_MALFORMED")
+
+
+@pytest.mark.parametrize("schema_value", [True, 1.0])
+@pytest.mark.parametrize(
+    "target, expected_code",
+    [
+        ("authority", "AUTHORITY_MALFORMED"),
+        ("outgoing", "OFF_READBACK_MALFORMED"),
+        ("incoming", "OFF_READBACK_MALFORMED"),
+    ],
+)
+def test_schema_version_must_be_an_integer_on_authority_and_host_states(
+    fence_pair, schema_value, target, expected_code
+):
+    mac, linux, _clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="typed-schema"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    linux.claim()
+
+    if target == "authority":
+        path = linux.authority_path
+    elif target == "outgoing":
+        path = linux.host_state_path("mac")
+    else:
+        path = linux.host_state_path("linux")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["schema_version"] = schema_value
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    assert_refused(linux.claim, expected_code)
+
+
+@pytest.mark.parametrize(
+    "mutation, expected_code",
+    [
+        ("missing_fact", "AUTHORITY_OFF_FACT_MISSING"),
+        ("wrong_fact", "AUTHORITY_OFF_FACT_MALFORMED"),
+        ("timestamp_disagreement", "OFF_READBACK_TIMESTAMP_MISMATCH"),
+        ("inverted_lifetime", "AUTHORITY_MALFORMED"),
+        ("off_before_issue", "AUTHORITY_OFF_FACT_MALFORMED"),
+        ("claim_before_issue", "AUTHORITY_MALFORMED"),
+    ],
+)
+def test_first_claim_rejects_inconsistent_off_and_time_evidence(
+    fence_pair, mutation, expected_code
+):
+    mac, linux, clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id=f"bad-entry-{mutation}"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    authority_path = linux.authority_path
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    state_path = linux.host_state_path("mac")
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+
+    if mutation == "missing_fact":
+        authority["outgoing_off"].pop("fact")
+    elif mutation == "wrong_fact":
+        authority["outgoing_off"]["fact"] = "consumer stopped (unverified)"
+    elif mutation == "timestamp_disagreement":
+        state["observed_at"] = (BASE_TIME + timedelta(seconds=1)).isoformat()
+        clock[0] = BASE_TIME + timedelta(seconds=2)
+    elif mutation == "inverted_lifetime":
+        authority["issued_at"] = (BASE_TIME + timedelta(seconds=20)).isoformat()
+        authority["expires_at"] = (BASE_TIME + timedelta(seconds=10)).isoformat()
+    elif mutation == "off_before_issue":
+        earlier = (BASE_TIME - timedelta(seconds=1)).isoformat()
+        authority["outgoing_off"]["observed_at"] = earlier
+        state["observed_at"] = earlier
+        clock[0] = BASE_TIME + timedelta(seconds=1)
+    elif mutation == "claim_before_issue":
+        clock[0] = BASE_TIME - timedelta(seconds=1)
+    else:  # pragma: no cover - the parameter list is exhaustive
+        raise AssertionError(mutation)
+
+    authority_path.write_text(json.dumps(authority), encoding="utf-8")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert_refused(linux.claim, expected_code)
+
+
+def test_chronology_rejected_on_restart_is_also_rejected_at_entry(fence_pair, tmp_path):
+    mac, linux, clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="restart-chronology"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    linux.claim()
+
+    authority_path = linux.authority_path
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    late_active = BASE_TIME + timedelta(seconds=FENCE_TTL_SECONDS + 5)
+    authority["active_since"] = late_active.isoformat()
+    authority_path.write_text(json.dumps(authority), encoding="utf-8")
+    incoming_state_path = linux.host_state_path("linux")
+    incoming_state = json.loads(incoming_state_path.read_text(encoding="utf-8"))
+    incoming_state["observed_at"] = late_active.isoformat()
+    incoming_state_path.write_text(json.dumps(incoming_state), encoding="utf-8")
+    clock[0] = late_active
+    assert_refused(linux.claim, "ACTIVE_ARTIFACT_MALFORMED")
+
+    entry_root = tmp_path / "entry-chronology"
+    entry_clock = [BASE_TIME]
+    entry_mac = CutoverFenceStore(
+        entry_root, token=TOKEN, host_id="mac", now=lambda: entry_clock[0]
+    )
+    entry_linux = CutoverFenceStore(
+        entry_root, token=TOKEN, host_id="linux", now=lambda: entry_clock[0]
+    )
+    entry_request_id = entry_mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="entry-chronology"
+    )
+    entry_mac.confirm_off(request_id=entry_request_id, confirmed_local_off=True)
+    entry_authority_path = entry_linux.authority_path
+    entry_authority = json.loads(entry_authority_path.read_text(encoding="utf-8"))
+    entry_state_path = entry_linux.host_state_path("mac")
+    entry_state = json.loads(entry_state_path.read_text(encoding="utf-8"))
+    earlier = (BASE_TIME - timedelta(seconds=1)).isoformat()
+    entry_authority["outgoing_off"]["observed_at"] = earlier
+    entry_state["observed_at"] = earlier
+    entry_authority_path.write_text(json.dumps(entry_authority), encoding="utf-8")
+    entry_state_path.write_text(json.dumps(entry_state), encoding="utf-8")
+    entry_clock[0] = BASE_TIME + timedelta(seconds=1)
+
+    assert_refused(entry_linux.claim, "AUTHORITY_OFF_FACT_MALFORMED")
 
 
 def test_same_host_restart_refuses_malformed_active_artifact(fence_pair):

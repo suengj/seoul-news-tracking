@@ -1,0 +1,20 @@
+[Unit]
+Description=Seoul News Tracking poller and Telegram bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=seoulnews
+Group=seoulnews
+WorkingDirectory=/path/to/seoul-news-tracking
+EnvironmentFile=/path/to/seoul-news-tracking-config/run_local.env
+ExecStart=/path/to/seoul-news-tracking/.venv/bin/python -u -m app.commands.run_local
+Restart=always
+RestartSec=60
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

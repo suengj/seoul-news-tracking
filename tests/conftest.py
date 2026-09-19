@@ -63,6 +63,8 @@ def build_settings(**overrides) -> Settings:
         cleanup_interval_hours=24,
         tombstone_retention_days=365,
         local_shutdown_command_enabled=False,
+        deployment_label="test-deployment",
+        runtime_mode="test",
         template_recommend_threshold=0.85,
         ai_enabled=False,
         openai_api_key="",

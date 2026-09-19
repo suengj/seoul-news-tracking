@@ -18,6 +18,11 @@ import signal
 import sys
 
 from app.config import load_settings
+from app.cutover_fence import (
+    FENCE_REFUSAL_EXIT_CODE,
+    CutoverFenceError,
+    CutoverFenceStore,
+)
 from app.database import Database
 from app.logging_config import configure_logging
 from app.process_lock import SingleInstanceLock
@@ -47,6 +52,35 @@ def main() -> int:
     except RuntimeError as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 1
+
+    try:
+        if settings.cutover_fence_path is None:
+            raise CutoverFenceError(
+                "FENCE_NOT_CONFIGURED",
+                "CUTOVER_FENCE_PATH is not configured; refusing to start getUpdates",
+            )
+        if not settings.cutover_host_id or settings.cutover_host_id == "unconfigured":
+            raise CutoverFenceError(
+                "HOST_ID_NOT_CONFIGURED",
+                "CUTOVER_HOST_ID is not configured; refusing to start getUpdates",
+            )
+        CutoverFenceStore(
+            settings.cutover_fence_path,
+            token=settings.telegram_bot_token,
+            host_id=settings.cutover_host_id,
+        ).claim()
+    except CutoverFenceError as exc:
+        print(f"FAILED: {exc}", file=sys.stderr)
+        lock.release()
+        return FENCE_REFUSAL_EXIT_CODE
+    except ValueError as exc:
+        print(
+            "FAILED: CUTOVER_FENCE_REFUSED[HOST_ID_MALFORMED]: "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        lock.release()
+        return FENCE_REFUSAL_EXIT_CODE
 
     db = Database(settings.database_path)
     bot = TelegramBotRunner(settings, db)

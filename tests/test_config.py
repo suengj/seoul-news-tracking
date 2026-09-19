@@ -124,6 +124,28 @@ def test_service_v1_defaults(tmp_path, monkeypatch):
     assert settings.ai_configured is False
 
 
+def test_runtime_identity_is_loaded_from_explicit_environment_values(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEPLOYMENT_LABEL", "linux-production")
+    monkeypatch.setenv("RUNTIME_MODE", "systemd")
+
+    settings = load_settings(env_file=tmp_path / "missing.env")
+
+    assert settings.deployment_label == "linux-production"
+    assert settings.runtime_mode == "systemd"
+
+
+def test_cutover_fence_requires_explicit_shared_path_and_host_identity(tmp_path, monkeypatch):
+    monkeypatch.setenv("CUTOVER_FENCE_PATH", "shared/cutover-fence")
+    monkeypatch.setenv("CUTOVER_HOST_ID", "linux")
+
+    settings = load_settings(env_file=tmp_path / "missing.env")
+
+    assert settings.cutover_fence_path is not None
+    assert settings.cutover_fence_path.is_absolute()
+    assert settings.cutover_fence_path.name == "cutover-fence"
+    assert settings.cutover_host_id == "linux"
+
+
 def test_poll_interval_out_of_range_raises_config_error(tmp_path, monkeypatch):
     monkeypatch.setenv("POLL_INTERVAL_SECONDS", "1")
     with pytest.raises(ConfigError):

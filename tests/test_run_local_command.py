@@ -7,6 +7,7 @@ import time
 import pytest
 
 from app.commands import run_local
+from app.cutover_fence import FENCE_REFUSAL_EXIT_CODE
 from app.process_lock import SingleInstanceLock
 
 
@@ -265,3 +266,28 @@ def test_check_children_gives_up_after_repeated_crashes(monkeypatch):
         procs, started_at, trackers, child_specs=(("flaky", "unused"),)
     )
     assert ok is False
+
+
+def test_fence_refusal_is_not_respawned_by_child_restart_loop(monkeypatch):
+    class RefusedProcess:
+        pid = 4321
+        returncode = FENCE_REFUSAL_EXIT_CODE
+
+        def poll(self):
+            return self.returncode
+
+    spawn_calls = []
+    monkeypatch.setattr(run_local, "_spawn", lambda module: spawn_calls.append(module))
+    procs = {"telegram_bot": RefusedProcess()}
+    started_at = {"telegram_bot": time.monotonic()}
+    trackers = {"telegram_bot": run_local._RestartTracker()}
+
+    ok = run_local._check_children(
+        procs,
+        started_at,
+        trackers,
+        child_specs=(("telegram_bot", "app.commands.run_telegram_bot"),),
+    )
+
+    assert ok is False
+    assert spawn_calls == []

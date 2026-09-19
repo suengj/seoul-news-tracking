@@ -30,7 +30,9 @@ The two communicate only through the shared SQLite tables.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -150,9 +152,20 @@ _SOURCE_ERROR_LABEL = {
     "unknown": "알 수 없는 오류",
 }
 
+_SAFE_RUNTIME_IDENTITY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
+_SENSITIVE_RUNTIME_IDENTITY_RE = re.compile(
+    r"(?i)(?:token|secret|api[_-]?key|password|credential|private|chat[_-]?id|"
+    r"^sk[-_]|^xox[baprs]-|^gh[pousr]_)"
+)
+
 
 def _safe_runtime_identity(value: str) -> str:
-    """Return a short configured label, never a path or multiline detail."""
+    """Return a short non-sensitive operator label.
+
+    Runtime identity is an informational display field, not a general
+    configuration echo. Restricting its grammar also excludes IP addresses,
+    paths, and common credential-shaped labels before Markdown escaping.
+    """
     candidate = str(value).strip()
     if (
         not candidate
@@ -160,7 +173,15 @@ def _safe_runtime_identity(value: str) -> str:
         or any(ord(char) < 32 for char in candidate)
         or "/" in candidate
         or "\\" in candidate
+        or not _SAFE_RUNTIME_IDENTITY_RE.fullmatch(candidate)
+        or _SENSITIVE_RUNTIME_IDENTITY_RE.search(candidate)
     ):
+        return "unconfigured"
+    try:
+        ipaddress.ip_address(candidate)
+    except ValueError:
+        pass
+    else:
         return "unconfigured"
     return candidate
 

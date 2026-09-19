@@ -11,8 +11,9 @@ shared authority location visible to both hosts.  It contains:
 An incoming host may claim a request only when the authority record says the
 outgoing host is OFF *and* a fresh read of the outgoing host record says OFF
 for the same request.  Silence, missing files, expiry, and malformed data
-never mean safe.  The local ``SingleInstanceLock`` remains responsible for
-two processes on one filesystem; this module is the cross-host hand-off
+never mean safe.  The fence-identity ``SingleInstanceLock`` is held for the
+consumer's lifetime and also makes the outgoing OFF check observable; this
+module supplies both the local identity lock and the cross-host hand-off
 fence.
 """
 
@@ -30,6 +31,8 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from app.process_lock import SingleInstanceLock
 
 FENCE_SCHEMA_VERSION = 1
 FENCE_TTL_SECONDS = 15 * 60
@@ -136,36 +139,144 @@ class CutoverFenceStore:
     def host_state_path(self, host_id: str) -> Path:
         return self.root / "hosts" / f"{_require_host_id(host_id)}.json"
 
+    @property
+    def consumer_lock_path(self) -> Path:
+        """The process-lifetime lock for this token/fence/host identity.
+
+        The fence root is part of the identity because it is the shared
+        authority location.  Keeping the token digest and host id in the
+        filename makes two deployments with different local database paths
+        contend for the same lock, while different bot tokens do not.
+        """
+        identity = hashlib.sha256(
+            f"{self.token_digest}\0{self.host_id}".encode("utf-8")
+        ).hexdigest()
+        return self.root / "consumers" / f"{self.host_id}-{identity}.lock"
+
     @contextmanager
     def _authority_lock(self, *, create: bool) -> Iterator[None]:
-        if create:
-            self.root.mkdir(parents=True, exist_ok=True)
-        elif not self.root.is_dir():
-            yield
-            return
+        try:
+            if create:
+                self.root.mkdir(parents=True, exist_ok=True)
+            elif not self.root.is_dir():
+                yield
+                return
+        except OSError as exc:
+            raise CutoverFenceError(
+                "FENCE_FILESYSTEM_UNAVAILABLE",
+                "the fence directory cannot be created or inspected",
+            ) from exc
 
         lock_path = self.root / "authority.lock"
-        with open(lock_path, "a+", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            lock_file = open(lock_path, "a+", encoding="utf-8")
+        except OSError as exc:
+            raise CutoverFenceError(
+                "FENCE_LOCK_UNAVAILABLE",
+                "the shared authority lock cannot be opened",
+            ) from exc
+        try:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+            except OSError as exc:
+                raise CutoverFenceError(
+                    "FENCE_LOCK_UNAVAILABLE",
+                    "the shared authority lock cannot be acquired",
+                ) from exc
             try:
                 yield
             finally:
-                fcntl.flock(lock_file, fcntl.LOCK_UN)
+                try:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+                except OSError as exc:
+                    raise CutoverFenceError(
+                        "FENCE_LOCK_UNAVAILABLE",
+                        "the shared authority lock cannot be released safely",
+                    ) from exc
+        finally:
+            lock_file.close()
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        try:
+            directory_fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        except OSError as exc:
+            raise CutoverFenceError(
+                "FENCE_FILESYSTEM_UNAVAILABLE",
+                "the fence directory cannot be opened for durability verification",
+            ) from exc
+        try:
+            os.fsync(directory_fd)
+        except OSError as exc:
+            raise CutoverFenceError(
+                "FENCE_FILESYSTEM_UNAVAILABLE",
+                "the fence directory does not provide durable rename semantics",
+            ) from exc
+        finally:
+            os.close(directory_fd)
 
     @staticmethod
     def _atomic_write(path: Path, value: dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        except OSError as exc:
+            raise CutoverFenceError(
+                "FENCE_FILESYSTEM_UNAVAILABLE",
+                "the fence record cannot be written atomically",
+            ) from exc
         temp_path = Path(temp_name)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(value, handle, ensure_ascii=True, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_path, path)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(value, handle, ensure_ascii=True, sort_keys=True)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_path, path)
+                CutoverFenceStore._fsync_directory(path.parent)
+            except CutoverFenceError:
+                raise
+            except (OSError, TypeError, ValueError) as exc:
+                raise CutoverFenceError(
+                    "FENCE_FILESYSTEM_UNAVAILABLE",
+                    "the fence record cannot be committed durably",
+                ) from exc
         finally:
             temp_path.unlink(missing_ok=True)
+
+    def verify_filesystem(self) -> None:
+        """Verify the local shared-fence operations required by this protocol.
+
+        The probe is intentionally performed under the same advisory lock as
+        authority transitions.  It proves that this client can lock, atomically
+        replace, read back, and durably commit a file.  Cross-client lock and
+        cache coherence still require the deployment contract and a probe run
+        from both hosts; no single process can prove another client's mount
+        semantics.
+        """
+        probe_path = self.root / ".fence-filesystem-probe.json"
+        probe = {"nonce": uuid.uuid4().hex}
+        with self._authority_lock(create=True):
+            self._atomic_write(probe_path, probe)
+            observed = _read_json(
+                probe_path,
+                missing_code="FENCE_FILESYSTEM_UNAVAILABLE",
+                malformed_code="FENCE_FILESYSTEM_UNAVAILABLE",
+            )
+            if observed != probe:
+                raise CutoverFenceError(
+                    "FENCE_FILESYSTEM_UNAVAILABLE",
+                    "the shared fence read-back is not current",
+                )
+            try:
+                probe_path.unlink()
+            except OSError as exc:
+                raise CutoverFenceError(
+                    "FENCE_FILESYSTEM_UNAVAILABLE",
+                    "the shared fence probe cannot be removed",
+                ) from exc
+            self._fsync_directory(self.root)
 
     def _read_authority(self) -> dict[str, Any]:
         return _read_json(
@@ -223,6 +334,7 @@ class CutoverFenceStore:
         expected_host: str,
         expected_request_id: str,
         require_off: bool,
+        require_fresh: bool = True,
     ) -> None:
         if state.get("schema_version") != FENCE_SCHEMA_VERSION:
             raise CutoverFenceError("OFF_READBACK_MALFORMED", "unsupported host-state schema")
@@ -243,11 +355,12 @@ class CutoverFenceStore:
                 f"outgoing host reported {state_value!r}, not positive OFF",
             )
         observed_at = _parse_timestamp(state.get("observed_at"), code="OFF_READBACK_MALFORMED")
-        now = self._now()
-        if observed_at > now:
-            raise CutoverFenceError("OFF_READBACK_FUTURE", "read-back timestamp is in the future")
-        if now - observed_at > timedelta(seconds=FENCE_TTL_SECONDS):
-            raise CutoverFenceError("OFF_READBACK_STALE", "read-back evidence is stale")
+        if require_fresh:
+            now = self._now()
+            if observed_at > now:
+                raise CutoverFenceError("OFF_READBACK_FUTURE", "read-back timestamp is in the future")
+            if now - observed_at > timedelta(seconds=FENCE_TTL_SECONDS):
+                raise CutoverFenceError("OFF_READBACK_STALE", "read-back evidence is stale")
 
     def request_cutover(
         self,
@@ -298,11 +411,13 @@ class CutoverFenceStore:
                             "CUTOVER_IN_PROGRESS",
                             "another cutover must finish or be repaired first",
                         )
-                elif phase == PHASE_ACTIVE and current.get("active_host") != outgoing_host:
-                    raise CutoverFenceError(
-                        "AUTHORITY_HELD_BY_OTHER_HOST",
-                        "only the current active host may begin rollback",
-                    )
+                elif phase == PHASE_ACTIVE:
+                    if current.get("active_host") != outgoing_host:
+                        raise CutoverFenceError(
+                            "AUTHORITY_HELD_BY_OTHER_HOST",
+                            "only the current active host may begin rollback",
+                        )
+                    self._check_active_artifact(current)
             self._atomic_write(self.authority_path, record)
         return request_id
 
@@ -331,43 +446,62 @@ class CutoverFenceStore:
             self._write_host_state(record, state="ACTIVE", observed_at=self._now())
 
     def confirm_off(self, *, request_id: str, confirmed_local_off: bool = False) -> None:
-        """Record positive OFF and its separately readable host observation."""
+        """Record positive OFF after the consumer identity lock is free."""
         if not confirmed_local_off:
             raise CutoverFenceError(
                 "OFF_CONFIRMATION_REQUIRED",
                 "the outgoing operator must positively confirm the local consumer is stopped",
             )
         request_id = _require_request_id(request_id)
-        with self._authority_lock(create=False):
-            record = self._read_authority()
-            self._check_common_authority(record)
-            self._check_expiry(record)
-            if record["request_id"] != request_id:
-                raise CutoverFenceError(
-                    "REQUEST_NOT_FOUND", "request_id does not name the current request"
-                )
-            if record["outgoing_host"] != self.host_id:
-                raise CutoverFenceError(
-                    "REQUEST_WRONG_OUTGOING_HOST", "host is not the outgoing host"
-                )
-            if record["phase"] == PHASE_OFF_RECORDED:
-                raise CutoverFenceError("OFF_ALREADY_RECORDED", "OFF evidence was already recorded")
-            if record["phase"] != PHASE_REQUESTED:
-                raise CutoverFenceError("CUTOVER_NOT_REQUESTED", "cutover is not awaiting OFF")
+        # Acquire in the same order as run_telegram_bot (consumer identity,
+        # then authority) so an operator confirmation cannot deadlock with a
+        # process that is entering the polling loop.
+        consumer_lock = SingleInstanceLock(self.consumer_lock_path)
+        try:
+            consumer_lock.acquire()
+        except RuntimeError as exc:
+            raise CutoverFenceError(
+                "LOCAL_CONSUMER_STILL_ACTIVE",
+                "the local getUpdates consumer still holds the fence identity lock",
+            ) from exc
+        try:
+            with self._authority_lock(create=False):
+                record = self._read_authority()
+                self._check_common_authority(record)
+                self._check_expiry(record)
+                if record["request_id"] != request_id:
+                    raise CutoverFenceError(
+                        "REQUEST_NOT_FOUND", "request_id does not name the current request"
+                    )
+                if record["outgoing_host"] != self.host_id:
+                    raise CutoverFenceError(
+                        "REQUEST_WRONG_OUTGOING_HOST", "host is not the outgoing host"
+                    )
+                if record["phase"] == PHASE_OFF_RECORDED:
+                    raise CutoverFenceError(
+                        "OFF_ALREADY_RECORDED", "OFF evidence was already recorded"
+                    )
+                if record["phase"] != PHASE_REQUESTED:
+                    raise CutoverFenceError("CUTOVER_NOT_REQUESTED", "cutover is not awaiting OFF")
+                self._record_off(record, request_id)
+        finally:
+            consumer_lock.release()
 
-            observed_at = self._now()
-            # The host-state file is deliberately separate from authority.json.
-            # A crash between either write leaves the request non-claimable.
-            self._write_host_state(record, state="OFF", observed_at=observed_at)
-            record = dict(record)
-            record["phase"] = PHASE_OFF_RECORDED
-            record["outgoing_off"] = {
-                "host_id": self.host_id,
-                "request_id": request_id,
-                "observed_at": _timestamp(observed_at),
-                "fact": "local getUpdates consumer positively confirmed stopped",
-            }
-            self._atomic_write(self.authority_path, record)
+    def _record_off(self, record: dict[str, Any], request_id: str) -> None:
+        """Write OFF evidence while the caller holds the identity lock."""
+        observed_at = self._now()
+        # The host-state file is deliberately separate from authority.json.
+        # A crash between either write leaves the request non-claimable.
+        self._write_host_state(record, state="OFF", observed_at=observed_at)
+        record = dict(record)
+        record["phase"] = PHASE_OFF_RECORDED
+        record["outgoing_off"] = {
+            "host_id": self.host_id,
+            "request_id": request_id,
+            "observed_at": _timestamp(observed_at),
+            "fact": "local getUpdates consumer positively confirmed stopped",
+        }
+        self._atomic_write(self.authority_path, record)
 
     def _write_host_state(
         self,
@@ -399,8 +533,94 @@ class CutoverFenceStore:
         )
         return state
 
+    def _check_active_artifact(self, record: dict[str, Any]) -> None:
+        """Validate every durable fact required for same-host restart."""
+        try:
+            active_host = _require_host_id(record["active_host"], field="active_host")
+        except (KeyError, ValueError) as exc:
+            raise CutoverFenceError(
+                "ACTIVE_ARTIFACT_MALFORMED", "ACTIVE authority has no valid active host"
+            ) from exc
+        if active_host != record["incoming_host"]:
+            raise CutoverFenceError(
+                "ACTIVE_ARTIFACT_MALFORMED",
+                "ACTIVE authority active_host does not match incoming_host",
+            )
+
+        issued_at = _parse_timestamp(record.get("issued_at"), code="ACTIVE_ARTIFACT_MALFORMED")
+        expires_at = _parse_timestamp(record.get("expires_at"), code="ACTIVE_ARTIFACT_MALFORMED")
+        if expires_at <= issued_at or expires_at - issued_at > timedelta(seconds=FENCE_TTL_SECONDS):
+            raise CutoverFenceError(
+                "ACTIVE_ARTIFACT_MALFORMED", "ACTIVE authority lifetime is inconsistent"
+            )
+        active_since = _parse_timestamp(
+            record.get("active_since"), code="ACTIVE_ARTIFACT_MALFORMED"
+        )
+        if active_since < issued_at or active_since > self._now():
+            raise CutoverFenceError(
+                "ACTIVE_ARTIFACT_MALFORMED", "ACTIVE authority timestamp is inconsistent"
+            )
+
+        outgoing_off = record.get("outgoing_off")
+        if not isinstance(outgoing_off, dict):
+            raise CutoverFenceError(
+                "ACTIVE_ARTIFACT_MALFORMED", "ACTIVE authority has no positive OFF fact"
+            )
+        if (
+            outgoing_off.get("host_id") != record["outgoing_host"]
+            or outgoing_off.get("request_id") != record["request_id"]
+            or outgoing_off.get("fact")
+            != "local getUpdates consumer positively confirmed stopped"
+        ):
+            raise CutoverFenceError(
+                "ACTIVE_ARTIFACT_MALFORMED", "ACTIVE authority OFF fact is inconsistent"
+            )
+        off_observed_at = _parse_timestamp(
+            outgoing_off.get("observed_at"), code="ACTIVE_ARTIFACT_MALFORMED"
+        )
+        if off_observed_at < issued_at or off_observed_at > active_since:
+            raise CutoverFenceError(
+                "ACTIVE_ARTIFACT_MALFORMED", "ACTIVE authority OFF timestamp is inconsistent"
+            )
+
+        try:
+            outgoing_state = self._read_host_state(record["outgoing_host"])
+            incoming_state = self._read_host_state(record["incoming_host"])
+        except CutoverFenceError as exc:
+            raise CutoverFenceError(
+                "ACTIVE_ARTIFACT_INCOMPLETE",
+                "ACTIVE authority is missing a host-state record",
+            ) from exc
+        self._check_host_state(
+            outgoing_state,
+            expected_host=record["outgoing_host"],
+            expected_request_id=record["request_id"],
+            require_off=True,
+            require_fresh=False,
+        )
+        if _parse_timestamp(outgoing_state["observed_at"], code="ACTIVE_ARTIFACT_MALFORMED") != off_observed_at:
+            raise CutoverFenceError(
+                "ACTIVE_ARTIFACT_MALFORMED", "ACTIVE authority does not match OFF read-back"
+            )
+        self._check_host_state(
+            incoming_state,
+            expected_host=record["incoming_host"],
+            expected_request_id=record["request_id"],
+            require_off=False,
+            require_fresh=False,
+        )
+        if incoming_state.get("state") != "ACTIVE":
+            raise CutoverFenceError(
+                "ACTIVE_ARTIFACT_MALFORMED", "incoming host did not record ACTIVE"
+            )
+        if _parse_timestamp(incoming_state["observed_at"], code="ACTIVE_ARTIFACT_MALFORMED") != active_since:
+            raise CutoverFenceError(
+                "ACTIVE_ARTIFACT_MALFORMED", "ACTIVE authority does not match active read-back"
+            )
+
     def claim(self) -> dict[str, Any]:
         """Atomically consume a valid hand-off for this host before polling."""
+        self.verify_filesystem()
         with self._authority_lock(create=False):
             record = self._read_authority()
             self._check_common_authority(record)
@@ -411,8 +631,10 @@ class CutoverFenceStore:
                         "AUTHORITY_HELD_BY_OTHER_HOST",
                         "another host already owns the active consumer authority",
                     )
-                # A same-host restart may reuse durable authority.  The local
-                # SingleInstanceLock prevents a second same-filesystem process.
+                # A same-host restart may reuse durable authority, but only
+                # after validating the complete transition artifact.  The
+                # process-lifetime identity lock is held by run_telegram_bot.
+                self._check_active_artifact(record)
                 return record
 
             if record.get("incoming_host") != self.host_id:
@@ -482,12 +704,13 @@ class CutoverFenceStore:
             claimed["phase"] = PHASE_ACTIVE
             claimed["active_host"] = self.host_id
             claimed["active_since"] = _timestamp(self._now())
-            # Authority becomes ACTIVE before the best-effort ACTIVE status
-            # write.  If that status write fails, safety is preserved: the
-            # other host still sees this durable owner and cannot claim.
+            # Publish the incoming ACTIVE read-back before the authority
+            # transition.  A durable ACTIVE record therefore always has both
+            # host-state records required by the same-host restart branch.
+            self._write_host_state(
+                claimed,
+                state="ACTIVE",
+                observed_at=_parse_timestamp(claimed["active_since"], code="AUTHORITY_MALFORMED"),
+            )
             self._atomic_write(self.authority_path, claimed)
-            try:
-                self._write_host_state(claimed, state="ACTIVE", observed_at=self._now())
-            except OSError:
-                pass
             return claimed

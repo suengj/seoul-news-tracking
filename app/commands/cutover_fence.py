@@ -56,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="assert that the local getUpdates consumer was checked and is stopped",
     )
 
+    subparsers.add_parser(
+        "verify-filesystem",
+        help="probe lock, atomic replace, current read, and directory fsync support",
+    )
+
     return parser
 
 
@@ -76,6 +81,9 @@ def main(argv: list[str] | None = None) -> int:
                 confirmed_local_off=args.confirmed_local_off,
             )
             print(f"CUTOVER_OFF_RECORDED request_id={args.request_id}")
+        elif args.action == "verify-filesystem":
+            store.verify_filesystem()
+            print("CUTOVER_FILESYSTEM_VERIFIED")
         else:  # pragma: no cover - argparse enforces the subcommands
             raise ValueError(f"unknown action: {args.action}")
     except (CutoverFenceError, OSError, ValueError) as exc:

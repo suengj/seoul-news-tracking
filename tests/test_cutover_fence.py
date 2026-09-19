@@ -11,6 +11,7 @@ from app.cutover_fence import (
     CutoverFenceError,
     CutoverFenceStore,
 )
+from app.process_lock import SingleInstanceLock
 
 TOKEN = "fence-test-token"
 BASE_TIME = datetime(2026, 9, 19, 12, 0, 0, tzinfo=UTC)
@@ -47,6 +48,61 @@ def test_positive_cutover_requires_off_fact_and_independent_readback(fence_pair)
     assert claimed["outgoing_off"]["observed_at"]
 
 
+def test_same_host_restart_refuses_malformed_active_artifact(fence_pair):
+    mac, linux, _clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="active-artifact"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    linux.claim()
+
+    authority_path = linux.authority_path
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    authority.pop("active_since")
+    authority_path.write_text(json.dumps(authority), encoding="utf-8")
+
+    assert_refused(linux.claim, "ACTIVE_ARTIFACT_MALFORMED")
+
+
+def test_same_host_restart_refuses_active_outgoing_host_state(fence_pair):
+    mac, linux, _clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="active-state-mismatch"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    linux.claim()
+
+    state_path = mac.host_state_path("mac")
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["state"] = "ACTIVE"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert_refused(linux.claim, "OUTGOING_STILL_ACTIVE")
+
+
+def test_ancient_incomplete_same_host_active_is_refused(fence_pair):
+    _mac, linux, _clock = fence_pair
+    linux.authority_path.parent.mkdir(parents=True, exist_ok=True)
+    linux.authority_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "telegram-getupdates-cutover",
+                "request_id": "ancient-active",
+                "token_fingerprint": linux.token_digest,
+                "outgoing_host": "mac",
+                "incoming_host": "linux",
+                "phase": "ACTIVE",
+                "issued_at": "2000-01-01T00:00:00+00:00",
+                "active_host": "linux",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert_refused(linux.claim, "ACTIVE_ARTIFACT_MALFORMED")
+
+
 def test_authority_off_without_independent_readback_is_refused(fence_pair):
     mac, linux, _clock = fence_pair
     request_id = mac.request_cutover(
@@ -58,6 +114,37 @@ def test_authority_off_without_independent_readback_is_refused(fence_pair):
     # readable host fact makes a fresh claim fail closed.
     linux.host_state_path("mac").unlink()
     assert_refused(linux.claim, "OFF_READBACK_ABSENT")
+
+
+def test_wrong_host_but_otherwise_valid_off_readback_is_refused(fence_pair):
+    mac, linux, _clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="wrong-host-readback"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    state_path = mac.host_state_path("mac")
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["host_id"] = "linux"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert_refused(linux.claim, "OFF_READBACK_WRONG_HOST")
+
+
+def test_stale_host_readback_is_refused_even_with_unexpired_authority(fence_pair):
+    mac, linux, clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="stale-readback"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    state_path = mac.host_state_path("mac")
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["observed_at"] = (BASE_TIME - timedelta(seconds=FENCE_TTL_SECONDS + 1)).isoformat()
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    # Keep the authority within its TTL while making only the independent
+    # host-state read-back stale.
+    assert clock[0] < BASE_TIME + timedelta(seconds=FENCE_TTL_SECONDS)
+    assert_refused(linux.claim, "OFF_READBACK_STALE")
 
 
 def test_mac_active_linux_start_is_refused_for_active_outgoing_reason(fence_pair):
@@ -155,3 +242,61 @@ def test_malformed_independent_readback_is_refused(fence_pair):
     state_path.write_text(json.dumps({"state": "OFF"}), encoding="utf-8")
 
     assert_refused(linux.claim, "OFF_READBACK_MALFORMED")
+
+
+def test_unreadable_authority_lock_is_a_terminal_fence_refusal(fence_pair):
+    _mac, linux, _clock = fence_pair
+    linux.root.mkdir(parents=True, exist_ok=True)
+    (linux.root / "authority.lock").mkdir()
+
+    assert_refused(linux.claim, "FENCE_LOCK_UNAVAILABLE")
+
+
+def test_directory_fsync_failure_refuses_to_publish_authority(fence_pair, monkeypatch):
+    mac, _linux, _clock = fence_pair
+
+    def fail_fsync(_path):
+        raise OSError("directory fsync unavailable")
+
+    monkeypatch.setattr(CutoverFenceStore, "_fsync_directory", staticmethod(fail_fsync))
+
+    assert_refused(
+        lambda: mac.request_cutover(
+            outgoing_host="mac", incoming_host="linux", request_id="no-durable-rename"
+        ),
+        "FENCE_FILESYSTEM_UNAVAILABLE",
+    )
+    # os.replace may already have happened when the directory fsync fails;
+    # the caller still receives no successful transition acknowledgement.
+
+
+def test_confirm_off_refuses_while_identity_consumer_lock_is_held(fence_pair):
+    mac, _linux, _clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="live-consumer"
+    )
+    held = SingleInstanceLock(mac.consumer_lock_path)
+    held.acquire()
+    try:
+        assert_refused(
+            lambda: mac.confirm_off(request_id=request_id, confirmed_local_off=True),
+            "LOCAL_CONSUMER_STILL_ACTIVE",
+        )
+    finally:
+        held.release()
+
+
+def test_distinct_local_state_paths_share_one_fence_identity_lock(fence_pair, tmp_path):
+    mac, _linux, _clock = fence_pair
+    first_local_database = tmp_path / "state-a" / "bot.db"
+    second_local_database = tmp_path / "state-b" / "bot.db"
+    assert first_local_database.parent != second_local_database.parent
+
+    first = SingleInstanceLock(mac.consumer_lock_path)
+    second = SingleInstanceLock(mac.consumer_lock_path)
+    first.acquire()
+    try:
+        with pytest.raises(RuntimeError):
+            second.acquire()
+    finally:
+        first.release()

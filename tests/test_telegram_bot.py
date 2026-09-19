@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 import pytest
@@ -44,6 +45,11 @@ def _message_update(update_id, user_id, text, *, chat_id=555, message_id=None, c
             "text": text,
         },
     }
+
+
+def _decode_markdown_v2(text: str) -> str:
+    """Approximate Telegram's rendered text for escaped MarkdownV2 values."""
+    return re.sub(r"\\([_\*\[\]\(\)~`>#+\-=|{}.!\\])", r"\1", text)
 
 
 # -- authorization -----------------------------------------------------------
@@ -257,6 +263,8 @@ def test_status_does_not_leak_secrets_or_paths(make_settings, db, tmp_path):
         openai_api_key="OPENAI_API_KEY_SECRET",
         safetydata_service_key="SAFETYDATA_SERVICE_KEY_SECRET",
         database_path=tmp_path / "secret_dir" / "seoul_news.db",
+        deployment_label="203.0.113.7",
+        runtime_mode="SUPER_SECRET_TOKEN_VALUE",
     )
     db.record_poll_error(
         "Traceback (most recent call last): secret=STACK_TRACE_SECRET "
@@ -269,7 +277,8 @@ def test_status_does_not_leak_secrets_or_paths(make_settings, db, tmp_path):
     sent = []
     bot = make_bot(settings, db, _record_handler(sent))
     bot.dispatch(_message_update(1, user_id=111, text="/status"))
-    text = sent[0]["text"]
+    wire_text = sent[0]["text"]
+    rendered_text = _decode_markdown_v2(wire_text)
     forbidden_values = (
         "SUPER_SECRET_TOKEN_VALUE",
         "TELEGRAM_CHAT_ID_SECRET",
@@ -288,7 +297,9 @@ def test_status_does_not_leak_secrets_or_paths(make_settings, db, tmp_path):
         ".env",
     )
     for forbidden in forbidden_values:
-        assert forbidden not in text
+        assert forbidden not in rendered_text
+    assert "배포: unconfigured" in rendered_text
+    assert "실행 모드: unconfigured" in rendered_text
 
 
 # -- /pause and /resume --------------------------------------------------------

@@ -64,6 +64,47 @@ def test_missing_fence_refuses_before_bot_or_telegram_network(env_setup, monkeyp
     assert "FENCE" in capsys.readouterr().err
 
 
+def test_unreadable_authority_lock_returns_terminal_fence_code(env_setup, capsys):
+    fence_path = env_setup.parent / "fence"
+    fence_path.mkdir(parents=True)
+    (fence_path / "authority.lock").mkdir()
+
+    rc = run_telegram_bot.main()
+
+    assert rc == FENCE_REFUSAL_EXIT_CODE
+    assert "FENCE_LOCK_UNAVAILABLE" in capsys.readouterr().err
+
+
+def test_fence_identity_lock_blocks_different_database_path(tmp_path, monkeypatch, capsys):
+    fence_path = tmp_path / "fence"
+    first_db = tmp_path / "state-a" / "bot.db"
+    second_db = tmp_path / "state-b" / "bot.db"
+    monkeypatch.setenv("DATABASE_PATH", str(second_db))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake-chat")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "111")
+    monkeypatch.setenv("LOG_LEVEL", "ERROR")
+    monkeypatch.setenv("CUTOVER_FENCE_PATH", str(fence_path))
+    monkeypatch.setenv("CUTOVER_HOST_ID", "linux")
+    _grant_linux_authority(fence_path)
+
+    held = SingleInstanceLock(
+        CutoverFenceStore(fence_path, token="fake-token", host_id="linux").consumer_lock_path
+    )
+    held.acquire()
+    try:
+        class ShouldNotConstruct:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("the second identity cannot reach the bot")
+
+        monkeypatch.setattr(run_telegram_bot, "TelegramBotRunner", ShouldNotConstruct)
+        assert first_db.parent != second_db.parent
+        assert run_telegram_bot.main() == 1
+        assert "already be running" in capsys.readouterr().err
+    finally:
+        held.release()
+
+
 def test_valid_fence_is_claimed_before_runner_loop(env_setup, monkeypatch):
     fence_path = env_setup.parent / "fence"
     _grant_linux_authority(fence_path)
@@ -89,3 +130,4 @@ def test_valid_fence_is_claimed_before_runner_loop(env_setup, monkeypatch):
     assert calls == ["constructed", "ran", "closed"]
     authority = (fence_path / "authority.json").read_text(encoding="utf-8")
     assert '"phase": "ACTIVE"' in authority
+    assert list((fence_path / "consumers").glob("linux-*.lock"))

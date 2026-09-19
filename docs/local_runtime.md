@@ -59,8 +59,11 @@ Before the first Telegram request, `run_telegram_bot` must claim the
 two-host cutover authority described in
 [`docs/systemd_deployment.md`](systemd_deployment.md). `CUTOVER_FENCE_PATH`
 and `CUTOVER_HOST_ID` are mandatory for a real consumer; absent or invalid
-authority refuses startup. The local file lock remains a same-filesystem
-duplicate guard, not the cross-host fence.
+authority refuses startup. The bot holds a fence-identity file lock for its
+lifetime, derived from the token, fence path, and host id, so two local
+processes with different database paths still contend for one lock. The
+shared-filesystem requirements are documented in
+[`docs/systemd_deployment.md`](systemd_deployment.md).
 
 ## Starting things locally
 
@@ -204,8 +207,9 @@ Local testing uses Telegram's `getUpdates` long polling
 callback_query alike — is processed twice, with a bounded backoff on
 transient failures. Telegram itself rejects a second concurrent
 `getUpdates` call for the same bot token with HTTP 409; `run_telegram_bot`
-also takes a local file lock (`data/run_telegram_bot.lock`) so a second
-local instance fails fast with a clear error instead of racing.
+also takes a legacy database-directory lock plus the fence-identity lock, so
+a second local instance fails fast with a clear error even when it uses a
+different database path.
 
 The offset is persisted in SQLite (`system_state.telegram_update_offset`),
 not just kept in memory — a restart (clean or crashed) resumes from the

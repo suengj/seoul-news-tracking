@@ -48,6 +48,7 @@ RESTART_INITIAL_BACKOFF_SECONDS = 2.0
 RESTART_MAX_BACKOFF_SECONDS = 60.0
 RESTART_WINDOW_SECONDS = 600.0
 MAX_RESTARTS_IN_WINDOW = 5
+FENCE_REFUSAL_RETRY_SECONDS = 300.0
 
 
 @dataclass
@@ -121,6 +122,7 @@ def _check_children(
     *,
     child_specs: tuple[tuple[str, str], ...] = CHILD_SPECS,
     stop_requested: Callable[[], bool] | None = None,
+    retry_after: dict[str, float] | None = None,
 ) -> bool:
     """Poll every child once. Any that exited unexpectedly are restarted in
     place (with backoff), leaving the others untouched. Returns False if a
@@ -133,6 +135,15 @@ def _check_children(
     terminate it. Tests can omit it.
     """
     for name, module in child_specs:
+        if retry_after is not None and name in retry_after:
+            if time.monotonic() < retry_after[name]:
+                continue
+            del retry_after[name]
+            new_proc = _spawn(module)
+            procs[name] = new_proc
+            started_at[name] = time.monotonic()
+            logger.info("restarted %s after cutover fence refusal (pid=%d)", name, new_proc.pid)
+            continue
         proc = procs[name]
         rc = proc.poll()
         if rc is None:
@@ -144,10 +155,14 @@ def _check_children(
         )
         if name == "telegram_bot" and rc == FENCE_REFUSAL_EXIT_CODE:
             logger.error(
-                "telegram_bot refused the cutover fence; stopping without respawning "
-                "a consumer that has no authority"
+                "telegram_bot refused the cutover fence (exit code %s); "
+                "poller remains active and bot retry is scheduled in %.0fs",
+                rc,
+                FENCE_REFUSAL_RETRY_SECONDS,
             )
-            return False
+            if retry_after is not None:
+                retry_after[name] = time.monotonic() + FENCE_REFUSAL_RETRY_SECONDS
+            continue
         tracker = trackers[name]
         backoff = tracker.next_backoff_or_give_up()
         if backoff is None:
@@ -190,12 +205,16 @@ def main() -> int:
         nonlocal stop_requested
         stop_requested = True
 
+    def _stop_requested_now() -> bool:
+        return stop_requested
+
     signal.signal(signal.SIGINT, _request_stop)
     signal.signal(signal.SIGTERM, _request_stop)
 
     procs: dict[str, subprocess.Popen] = {}
     started_at: dict[str, float] = {}
     trackers: dict[str, _RestartTracker] = {}
+    retry_after: dict[str, float] = {}
 
     try:
         for name, module in CHILD_SPECS:
@@ -207,7 +226,11 @@ def main() -> int:
 
         while not stop_requested:
             if not _check_children(
-                procs, started_at, trackers, stop_requested=lambda: stop_requested
+                procs,
+                started_at,
+                trackers,
+                stop_requested=_stop_requested_now,
+                retry_after=retry_after,
             ):
                 exit_code = 1
                 stop_requested = True

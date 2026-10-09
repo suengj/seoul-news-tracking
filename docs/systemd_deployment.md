@@ -51,8 +51,10 @@ The Linux mapping is:
 | `WorkingDirectory` | Uses the existing Git checkout as the process working directory. |
 | `EnvironmentFile` | Keeps deployment configuration and secrets outside Git and outside the unit. |
 | `ExecStart` | Preserves the observed project virtualenv interpreter, unbuffered mode, module, and supervisor entry point. |
-| `Restart=always` | Carries the observed `KeepAlive=true` continuous-supervision intent: a terminated `run_local` is brought back, including after its crash-loop give-up exit. This is not a claim that the two supervisors have identical edge-case semantics. |
+| `Restart=always` | Carries the observed `KeepAlive=true` continuous-supervision intent: a terminated `run_local` is brought back, including after its crash-loop give-up exit. |
 | `RestartSec=60` | Carries the observed `ThrottleInterval=60` restart-throttle intent. It is a 60-second delay before systemd's restart attempt. |
+| `RestartPreventExitStatus=78` | Prevents systemd from repeatedly restarting if the supervisor ever propagates the bot's fence-refusal status directly. |
+| `StartLimitIntervalSec=300` / `StartLimitBurst=5` | Bounds repeated supervisor startup failures; systemd leaves the unit visibly failed after five starts in five minutes. |
 | `KillMode=control-group` | `run_local` supervises the poller and Telegram bot as child processes; stopping/restarting the unit must take the whole service cgroup with it. |
 | `StandardOutput`/`StandardError=journal` | Sends both streams to journald, replacing launchd's one combined `StandardOutPath`/`StandardErrorPath` file. |
 | `WantedBy=multi-user.target` | When the deployment authority enables the unit, it is attached to the normal multi-user boot target, providing reboot persistence. |
@@ -63,11 +65,14 @@ each timer firing would be the wrong lifecycle.
 
 ## Restart and reboot behaviour
 
-`run_local` already restarts an individual poller or Telegram child with its
-own backoff. The unit's `Restart=always` is the outer layer for the supervisor
-itself, with a 60-second delay matching the observed launchd throttle intent.
-An enabled unit attached to `multi-user.target` is started again after reboot;
-the source tree does not install, enable, start, or stop it.
+`run_local` restarts an individual poller or Telegram child with its own
+backoff. A Telegram cutover-fence refusal leaves the poller running and
+retries the bot no more often than every five minutes. The unit's
+`Restart=always` is the outer layer for the supervisor itself, with a
+60-second delay matching the observed launchd throttle intent. Start limits
+make repeated supervisor startup failures visible as a failed unit. An enabled
+unit attached to `multi-user.target` is started again after reboot; the source
+tree does not install, enable, start, or stop it.
 
 ## Logs
 
@@ -145,10 +150,11 @@ derived from the token, shared fence identity, and host id, and is held for the
 whole bot process lifetime, so different database paths cannot create two
 local consumers. A misconfigured duplicate host id is also serialized when
 both machines use the same coherent shared fence filesystem. The `run_local`
-supervisor does not respawn a Telegram child that exits with the fence-refusal
-code. A systemd `Restart=always` therefore repeats a refusal, never creates
-authority, and never starts a Telegram network call without an existing
-hand-off.
+supervisor does not respawn a Telegram child immediately after the
+fence-refusal code. It logs the refusal, keeps the poller active, and retries
+the child after five minutes. Each attempt still has to pass the fence before
+making a Telegram network call. Refusal is logged to journald; this repository
+has no separate operator notification path that avoids `getUpdates`.
 
 ### Operator protocol
 
@@ -189,6 +195,15 @@ and honest, lock-checked cutover operation. It does not authenticate
 operator-written files or detect an out-of-band consumer that does not use the
 fence identity lock.
 
+An old `ACTIVE` record remains a valid same-host restart authority after its
+handoff TTL, but the current owner can still supersede it by issuing a new
+cutover request. Before the restart fix, `request_cutover` ran the same TTL
+check as `claim`, so an aged `ACTIVE` record blocked a rollback request with
+`AUTHORITY_EXPIRED`. It now validates the ACTIVE artifact's lifetime
+consistency and both host-state records without checking elapsed TTL, then
+replaces the record with a fresh `REQUESTED` handoff. The new request and its
+OFF evidence remain bounded by the 15-minute TTL.
+
 ### Failure paths
 
 - No fence path/host id, absent evidence, malformed evidence, stale evidence,
@@ -203,3 +218,24 @@ fence identity lock.
   until it completes the reverse OFF/read-back sequence.
 - HTTP 409 may still be logged as a secondary symptom, but it cannot grant or
   revoke authority.
+
+### Applying the Linux supervisor fix
+
+Run these commands on the Linux host from an operator session. They update the
+existing checkout and installed unit; do not run them from the source change
+workspace.
+
+```bash
+git -C /opt/seoulnews pull --ff-only origin main
+sudo diff -u /etc/systemd/system/seoulnews-runlocal.service /opt/seoulnews/scripts/systemd/seoulnews-runlocal.service.example || true
+sudo install -o root -g root -m 0644 /opt/seoulnews/scripts/systemd/seoulnews-runlocal.service.example /etc/systemd/system/seoulnews-runlocal.service
+sudo systemctl daemon-reload
+sudo systemctl restart seoulnews-runlocal.service
+sudo systemctl status seoulnews-runlocal.service --no-pager
+sudo journalctl -u seoulnews-runlocal.service -n 100 --no-pager
+```
+
+Confirm the status is `active (running)`, the journal has a successful bot
+start after the fence claim, and the poller remains active. If the bot refuses,
+the journal records its refusal code and the unit stays up while the supervisor
+waits five minutes before its next bot attempt.

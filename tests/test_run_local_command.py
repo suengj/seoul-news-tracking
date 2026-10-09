@@ -281,13 +281,66 @@ def test_fence_refusal_is_not_respawned_by_child_restart_loop(monkeypatch):
     procs = {"telegram_bot": RefusedProcess()}
     started_at = {"telegram_bot": time.monotonic()}
     trackers = {"telegram_bot": run_local._RestartTracker()}
+    retry_after = {}
 
     ok = run_local._check_children(
         procs,
         started_at,
         trackers,
         child_specs=(("telegram_bot", "app.commands.run_telegram_bot"),),
+        retry_after=retry_after,
     )
 
-    assert ok is False
+    assert ok is True
     assert spawn_calls == []
+    assert retry_after["telegram_bot"] > time.monotonic()
+
+
+def test_fence_refusal_keeps_poller_and_retries_bot_slowly(monkeypatch, caplog):
+    class Process:
+        pid = 123
+
+        def __init__(self, code=None):
+            self.code = code
+
+        def poll(self):
+            return self.code
+
+    now = [100.0]
+    monkeypatch.setattr(run_local.time, "monotonic", lambda: now[0])
+    refused = Process(FENCE_REFUSAL_EXIT_CODE)
+    poller = Process()
+    spawned = []
+
+    def fake_spawn(module):
+        spawned.append(module)
+        return Process()
+
+    monkeypatch.setattr(run_local, "_spawn", fake_spawn)
+    procs = {"poller": poller, "telegram_bot": refused}
+    started_at = {"poller": 90.0, "telegram_bot": 95.0}
+    trackers = {name: run_local._RestartTracker() for name in procs}
+    retry_after = {}
+    specs = (("poller", "poller-module"), ("telegram_bot", "bot-module"))
+
+    assert run_local._check_children(
+        procs, started_at, trackers, child_specs=specs, retry_after=retry_after
+    ) is True
+    assert procs["poller"] is poller
+    assert retry_after["telegram_bot"] == 100.0 + run_local.FENCE_REFUSAL_RETRY_SECONDS
+    assert "exit code 78" in caplog.text
+
+    now[0] += run_local.FENCE_REFUSAL_RETRY_SECONDS - 1
+    assert run_local._check_children(
+        procs, started_at, trackers, child_specs=specs, retry_after=retry_after
+    ) is True
+    assert spawned == []
+    assert procs["poller"] is poller
+
+    now[0] += 1
+    assert run_local._check_children(
+        procs, started_at, trackers, child_specs=specs, retry_after=retry_after
+    ) is True
+    assert spawned == ["bot-module"]
+    assert procs["telegram_bot"].poll() is None
+    assert procs["poller"] is poller

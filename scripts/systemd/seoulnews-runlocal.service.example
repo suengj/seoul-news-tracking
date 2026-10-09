@@ -2,6 +2,8 @@
 Description=Seoul News Tracking poller and Telegram bot
 Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -12,6 +14,7 @@ EnvironmentFile=/path/to/seoul-news-tracking-config/run_local.env
 ExecStart=/path/to/seoul-news-tracking/.venv/bin/python -u -m app.commands.run_local
 Restart=always
 RestartSec=60
+RestartPreventExitStatus=78
 KillMode=control-group
 StandardOutput=journal
 StandardError=journal

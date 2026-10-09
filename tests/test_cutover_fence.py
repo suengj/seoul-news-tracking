@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
+from app import cutover_fence
 from app.cutover_fence import (
     FENCE_TTL_SECONDS,
     PHASE_ACTIVE,
@@ -49,6 +51,102 @@ def test_positive_cutover_requires_off_fact_and_independent_readback(fence_pair)
     # The artifact acknowledged at entry must also be accepted by the
     # same-host restart validator.
     assert linux.claim() == claimed
+
+
+@pytest.mark.parametrize("elapsed", [timedelta(minutes=16), timedelta(days=12)])
+def test_same_host_restart_survives_expired_handoff_ttl(fence_pair, elapsed):
+    mac, linux, clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id=f"long-lived-{elapsed.days}-{elapsed.seconds}"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    claimed = linux.claim()
+
+    clock[0] = BASE_TIME + elapsed
+    assert linux.claim() == claimed
+
+
+def test_expired_active_owner_can_be_superseded_by_new_cutover(fence_pair):
+    mac, linux, clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="active-to-linux"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    linux.claim()
+
+    clock[0] += timedelta(days=12)
+    rollback = linux.request_cutover(
+        outgoing_host="linux", incoming_host="mac", request_id="expired-active-rollback"
+    )
+    assert rollback == "expired-active-rollback"
+    assert_refused(mac.claim, "OUTGOING_STILL_ACTIVE")
+
+
+def test_authority_symlink_substitution_fails_closed(fence_pair, tmp_path):
+    mac, linux, _clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="authority-symlink"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    authority = linux.authority_path
+    copied = tmp_path / "authority-copy.json"
+    copied.write_bytes(authority.read_bytes())
+    authority.unlink()
+    authority.symlink_to(copied)
+
+    assert_refused(linux.claim, "AUTHORITY_MALFORMED")
+
+
+def test_authority_path_swap_after_open_uses_checked_file_descriptor(fence_pair, monkeypatch):
+    mac, linux, _clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="authority-path-swap"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    authority = linux.authority_path
+    original_open = cutover_fence.os.open
+    swapped = False
+
+    def swap_after_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        fd = original_open(path, flags, *args, **kwargs)
+        if Path(path) == authority and not swapped:
+            swapped = True
+            authority.unlink()
+            authority.write_text("{}", encoding="utf-8")
+        return fd
+
+    monkeypatch.setattr(cutover_fence.os, "open", swap_after_open)
+    assert linux.claim()["active_host"] == "linux"
+    assert swapped
+
+
+def test_oversized_authority_fails_closed_with_typed_error(fence_pair):
+    mac, linux, _clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="oversized-authority"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    linux.authority_path.write_bytes(b" " * (64 * 1024 + 1))
+
+    assert_refused(linux.claim, "AUTHORITY_MALFORMED")
+
+
+def test_authority_identity_is_bound_to_store_token_and_host(fence_pair):
+    mac, linux, _clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="identity-binding"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    other_token = CutoverFenceStore(
+        linux.root, token="different-token", host_id="linux", now=lambda: BASE_TIME
+    )
+    assert_refused(other_token.claim, "TOKEN_MISMATCH")
+
+    wrong_host = CutoverFenceStore(
+        linux.root, token=TOKEN, host_id="other-host", now=lambda: BASE_TIME
+    )
+    assert_refused(wrong_host.claim, "WRONG_INCOMING_HOST")
 
 
 def test_same_host_restart_refuses_active_timestamp_after_expiry(fence_pair):
@@ -231,6 +329,24 @@ def test_same_host_restart_refuses_active_outgoing_host_state(fence_pair):
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
     assert_refused(linux.claim, "OUTGOING_STILL_ACTIVE")
+
+
+def test_same_host_restart_refuses_incoming_host_state_without_active_confirmation(
+    fence_pair,
+):
+    mac, linux, _clock = fence_pair
+    request_id = mac.request_cutover(
+        outgoing_host="mac", incoming_host="linux", request_id="active-incoming-state"
+    )
+    mac.confirm_off(request_id=request_id, confirmed_local_off=True)
+    linux.claim()
+
+    state_path = linux.host_state_path("linux")
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["state"] = "OFF"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert_refused(linux.claim, "ACTIVE_ARTIFACT_MALFORMED")
 
 
 def test_ancient_incomplete_same_host_active_is_refused(fence_pair):

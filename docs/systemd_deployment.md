@@ -54,7 +54,7 @@ The Linux mapping is:
 | `Restart=always` | Carries the observed `KeepAlive=true` continuous-supervision intent: a terminated `run_local` is brought back, including after its crash-loop give-up exit. |
 | `RestartSec=60` | Carries the observed `ThrottleInterval=60` restart-throttle intent. It is a 60-second delay before systemd's restart attempt. |
 | `RestartPreventExitStatus=78` | Prevents systemd from repeatedly restarting if the supervisor ever propagates the bot's fence-refusal status directly. |
-| `StartLimitIntervalSec=300` / `StartLimitBurst=5` | Bounds repeated supervisor startup failures; systemd leaves the unit visibly failed after five starts in five minutes. |
+| `StartLimitIntervalSec=900` / `StartLimitBurst=5` | Bounds repeated supervisor startup failures. For a persistent failure where each run exits within 60 seconds, the sixth start is denied: five 60-second restart delays plus at most five 60-second failed runs take 600 seconds, within the 900-second window. |
 | `KillMode=control-group` | `run_local` supervises the poller and Telegram bot as child processes; stopping/restarting the unit must take the whole service cgroup with it. |
 | `StandardOutput`/`StandardError=journal` | Sends both streams to journald, replacing launchd's one combined `StandardOutPath`/`StandardErrorPath` file. |
 | `WantedBy=multi-user.target` | When the deployment authority enables the unit, it is attached to the normal multi-user boot target, providing reboot persistence. |
@@ -221,21 +221,73 @@ OFF evidence remain bounded by the 15-minute TTL.
 
 ### Applying the Linux supervisor fix
 
-Run these commands on the Linux host from an operator session. They update the
-existing checkout and installed unit; do not run them from the source change
-workspace.
+#### Updating an existing installation
+
+Run these commands on the Linux host from an operator session. This update
+installs only the restart-policy drop-in, preserving the installed unit's
+`WorkingDirectory`, `EnvironmentFile`, `ExecStart`, user, and group. The
+repository checkout and service paths here are the installed layout.
 
 ```bash
-git -C /opt/seoulnews pull --ff-only origin main
-sudo diff -u /etc/systemd/system/seoulnews-runlocal.service /opt/seoulnews/scripts/systemd/seoulnews-runlocal.service.example || true
-sudo install -o root -g root -m 0644 /opt/seoulnews/scripts/systemd/seoulnews-runlocal.service.example /etc/systemd/system/seoulnews-runlocal.service
+cd /opt/seoulnews/app
+PREVIOUS_COMMIT=$(git rev-parse HEAD)
+REVIEWED_COMMIT=REPLACE_WITH_REVIEWED_COMMIT
+git fetch origin "$REVIEWED_COMMIT"
+git checkout --detach "$REVIEWED_COMMIT"
+sudo install -d -o root -g root -m 0755 /etc/systemd/system/seoulnews-runlocal.service.d
+sudo install -o root -g root -m 0644 scripts/systemd/seoulnews-runlocal.service.d/20-restart-policy.conf /etc/systemd/system/seoulnews-runlocal.service.d/20-restart-policy.conf
+sudo systemd-analyze verify /etc/systemd/system/seoulnews-runlocal.service
 sudo systemctl daemon-reload
 sudo systemctl restart seoulnews-runlocal.service
-sudo systemctl status seoulnews-runlocal.service --no-pager
+sudo systemctl is-active seoulnews-runlocal.service
+sudo systemctl show seoulnews-runlocal.service --property=NRestarts
+sudo journalctl -u seoulnews-runlocal.service --since=-5min --no-pager
+```
+
+Replace `REPLACE_WITH_REVIEWED_COMMIT` with the reviewed commit hash before
+running the block. Confirm the service is `active`, `NRestarts` stays flat for
+several minutes, and the journal shows both poller and `telegram_bot` started
+with no `CUTOVER_FENCE_REFUSED`. If the bot is fence-refused after this change,
+the service remains active and the poller continues delivering; an
+`ERROR ... CUTOVER_FENCE_REFUSED[...]` line appears on each bot attempt, no
+more often than every five minutes. Check with:
+
+```bash
+sudo systemctl is-active seoulnews-runlocal.service
+sudo journalctl -u seoulnews-runlocal.service --since=-10min --no-pager | grep -E 'poller|telegram_bot|CUTOVER_FENCE_REFUSED'
+```
+
+Rollback by removing the drop-in and restoring the previous checkout. Keep the
+same operator shell open so `PREVIOUS_COMMIT` remains set:
+
+```bash
+sudo rm /etc/systemd/system/seoulnews-runlocal.service.d/20-restart-policy.conf
+sudo systemctl daemon-reload
+git checkout --detach "$PREVIOUS_COMMIT"
+sudo systemctl restart seoulnews-runlocal.service
+sudo systemctl is-active seoulnews-runlocal.service
 sudo journalctl -u seoulnews-runlocal.service -n 100 --no-pager
 ```
 
-Confirm the status is `active (running)`, the journal has a successful bot
-start after the fence claim, and the poller remains active. If the bot refuses,
-the journal records its refusal code and the unit stays up while the supervisor
-waits five minutes before its next bot attempt.
+#### Fresh installation
+
+For a new host only, render the placeholders in
+`scripts/systemd/seoulnews-runlocal.service.example`, validate the rendered
+unit, and then install it. Do not use this template to update an existing
+installation:
+
+```bash
+sed -e 's|/path/to/seoul-news-tracking|/opt/seoulnews/app|g' -e 's|/path/to/seoul-news-tracking-config|/etc/seoulnews|g' scripts/systemd/seoulnews-runlocal.service.example > /tmp/seoulnews-runlocal.service
+sudo systemd-analyze verify /tmp/seoulnews-runlocal.service
+sudo install -o root -g root -m 0644 /tmp/seoulnews-runlocal.service /etc/systemd/system/seoulnews-runlocal.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now seoulnews-runlocal.service
+sudo systemctl is-active seoulnews-runlocal.service
+```
+
+For the persistent startup-failure simulation, temporarily point a disposable
+unit at a command that exits immediately and start it repeatedly. With
+`StartLimitBurst=5`, `RestartSec=60`, and `StartLimitIntervalSec=900`, the
+initial start plus five restarts are all within 5 x (60s delay + 0s run) =
+300 seconds; systemd denies the sixth start and reports the unit as failed.
+Restore the unit after the simulation.

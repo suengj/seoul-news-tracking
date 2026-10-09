@@ -2,7 +2,9 @@
 Description=Seoul News Tracking poller and Telegram bot
 Wants=network-online.target
 After=network-online.target
-StartLimitIntervalSec=300
+# Six rapid failures are refused: 5 x (60s restart delay + <=60s failed run)
+# is at most 600s, inside this 900s window.
+StartLimitIntervalSec=900
 StartLimitBurst=5
 
 [Service]

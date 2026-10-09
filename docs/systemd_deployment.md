@@ -277,7 +277,14 @@ unit, and then install it. Do not use this template to update an existing
 installation:
 
 ```bash
-sed -e 's|/path/to/seoul-news-tracking|/opt/seoulnews/app|g' -e 's|/path/to/seoul-news-tracking-config|/etc/seoulnews|g' scripts/systemd/seoulnews-runlocal.service.example > /tmp/seoulnews-runlocal.service
+sed -e 's|/path/to/seoul-news-tracking-config|/etc/seoulnews|g' -e 's|/path/to/seoul-news-tracking|/opt/seoulnews/app|g' scripts/systemd/seoulnews-runlocal.service.example > /tmp/seoulnews-runlocal.service
+if grep -q '/path/to/' /tmp/seoulnews-runlocal.service; then
+  echo 'unresolved /path/to/ placeholder in rendered unit' >&2
+  exit 1
+fi
+grep -Fx 'WorkingDirectory=/opt/seoulnews/app' /tmp/seoulnews-runlocal.service
+grep -Fx 'EnvironmentFile=/etc/seoulnews/run_local.env' /tmp/seoulnews-runlocal.service
+grep -Fx 'ExecStart=/opt/seoulnews/app/.venv/bin/python -u -m app.commands.run_local' /tmp/seoulnews-runlocal.service
 sudo systemd-analyze verify /tmp/seoulnews-runlocal.service
 sudo install -o root -g root -m 0644 /tmp/seoulnews-runlocal.service /etc/systemd/system/seoulnews-runlocal.service
 sudo systemctl daemon-reload

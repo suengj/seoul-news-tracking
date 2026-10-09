@@ -2,6 +2,10 @@
 Description=Seoul News Tracking poller and Telegram bot
 Wants=network-online.target
 After=network-online.target
+# Six rapid failures are refused: 5 x (60s restart delay + <=60s failed run)
+# is at most 600s, inside this 900s window.
+StartLimitIntervalSec=900
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -12,6 +16,7 @@ EnvironmentFile=/path/to/seoul-news-tracking-config/run_local.env
 ExecStart=/path/to/seoul-news-tracking/.venv/bin/python -u -m app.commands.run_local
 Restart=always
 RestartSec=60
+RestartPreventExitStatus=78
 KillMode=control-group
 StandardOutput=journal
 StandardError=journal

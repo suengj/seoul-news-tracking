@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 import uuid
 from collections.abc import Iterator
@@ -36,6 +37,7 @@ from app.process_lock import SingleInstanceLock
 
 FENCE_SCHEMA_VERSION = 1
 FENCE_TTL_SECONDS = 15 * 60
+FENCE_MAX_RECORD_BYTES = 64 * 1024
 FENCE_REFUSAL_EXIT_CODE = 78
 
 AUTHORITY_KIND = "telegram-getupdates-cutover"
@@ -105,12 +107,31 @@ def _require_request_id(value: str) -> str:
 
 
 def _read_json(path: Path, *, missing_code: str, malformed_code: str) -> dict[str, Any]:
+    fd = None
     try:
-        raw = path.read_text(encoding="utf-8")
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise CutoverFenceError(malformed_code, f"evidence is not a regular file: {path.name}")
+        if metadata.st_size > FENCE_MAX_RECORD_BYTES:
+            raise CutoverFenceError(malformed_code, f"evidence is oversized: {path.name}")
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            payload = handle.read(FENCE_MAX_RECORD_BYTES + 1)
+        if len(payload) > FENCE_MAX_RECORD_BYTES:
+            raise CutoverFenceError(malformed_code, f"evidence is oversized: {path.name}")
+        raw = payload.decode("utf-8")
     except FileNotFoundError as exc:
         raise CutoverFenceError(missing_code, f"required evidence is absent: {path.name}") from exc
+    except CutoverFenceError:
+        raise
+    except UnicodeDecodeError as exc:
+        raise CutoverFenceError(malformed_code, f"evidence is not valid UTF-8: {path.name}") from exc
     except OSError as exc:
         raise CutoverFenceError(malformed_code, f"evidence cannot be read: {path.name}") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -158,7 +179,7 @@ class CutoverFenceStore:
         contend for the same lock, while different bot tokens do not.
         """
         identity = hashlib.sha256(
-            f"{self.token_digest}\0{self.host_id}".encode("utf-8")
+            f"{self.token_digest}\0{self.host_id}".encode()
         ).hexdigest()
         return self.root / "consumers" / f"{self.host_id}-{identity}.lock"
 
@@ -178,32 +199,29 @@ class CutoverFenceStore:
 
         lock_path = self.root / "authority.lock"
         try:
-            lock_file = open(lock_path, "a+", encoding="utf-8")
+            with open(lock_path, "a+", encoding="utf-8") as lock_file:
+                try:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX)
+                except OSError as exc:
+                    raise CutoverFenceError(
+                        "FENCE_LOCK_UNAVAILABLE",
+                        "the shared authority lock cannot be acquired",
+                    ) from exc
+                try:
+                    yield
+                finally:
+                    try:
+                        fcntl.flock(lock_file, fcntl.LOCK_UN)
+                    except OSError as exc:
+                        raise CutoverFenceError(
+                            "FENCE_LOCK_UNAVAILABLE",
+                            "the shared authority lock cannot be released safely",
+                        ) from exc
         except OSError as exc:
             raise CutoverFenceError(
                 "FENCE_LOCK_UNAVAILABLE",
                 "the shared authority lock cannot be opened",
             ) from exc
-        try:
-            try:
-                fcntl.flock(lock_file, fcntl.LOCK_EX)
-            except OSError as exc:
-                raise CutoverFenceError(
-                    "FENCE_LOCK_UNAVAILABLE",
-                    "the shared authority lock cannot be acquired",
-                ) from exc
-            try:
-                yield
-            finally:
-                try:
-                    fcntl.flock(lock_file, fcntl.LOCK_UN)
-                except OSError as exc:
-                    raise CutoverFenceError(
-                        "FENCE_LOCK_UNAVAILABLE",
-                        "the shared authority lock cannot be released safely",
-                    ) from exc
-        finally:
-            lock_file.close()
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
@@ -685,10 +703,14 @@ class CutoverFenceStore:
             raise CutoverFenceError(
                 "ACTIVE_ARTIFACT_MALFORMED", "ACTIVE authority does not match active read-back"
             )
-        # The same expiry and issue-time checks apply to a restart as to the
-        # initial claim.  The active timestamp check above supplies the
-        # remaining adjacent relation in the transition chronology.
-        self._check_expiry(record)
+        # Expiry bounds the hand-off and freshness of OFF evidence at claim
+        # time. Once ACTIVE, durable authority remains valid for same-host
+        # restarts until a new cutover request supersedes it. Preserve the
+        # issued-in-the-future refusal without expiring an established owner.
+        if _parse_timestamp(record.get("issued_at"), code="ACTIVE_ARTIFACT_MALFORMED") > self._now():
+            raise CutoverFenceError(
+                "AUTHORITY_MALFORMED", "authority was issued in the future"
+            )
 
     def claim(self) -> dict[str, Any]:
         """Atomically consume a valid hand-off for this host before polling."""
